@@ -94,3 +94,10 @@ MIT License - Free to use, modify, and distribute
 ---
 
 **Created by Sophia Elya** | [BoTTube](https://bottube.ai/sophia-elya) | [@RustchainPOA](https://x.com/RustchainPOA)
+
+## Future Enhancements
+
+- Multi-miner dashboard
+- Export to Prometheus/Grafana
+- Email/SMS alerts
+- Web UI interface
