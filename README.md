@@ -102,3 +102,27 @@ MIT License - Free to use, modify, and distribute
 - Export to Prometheus/Grafana
 - Email/SMS alerts
 - Web UI interface
+
+
+## Preflight Checks (2 minutes)
+
+Before running the monitor, verify these basics:
+
+```bash
+python3 --version
+python3 -c "import requests; print(requests.__version__)"
+curl -sS https://rustchain.org/health
+```
+
+If your node URL is custom, validate it explicitly:
+
+```bash
+curl -sS "https://YOUR-NODE/epoch"
+```
+
+## Quick Troubleshooting
+
+- `ModuleNotFoundError: requests` → run `pip install requests`
+- `Connection refused` or timeout → check node URL, firewall, and HTTPS/TLS settings
+- Empty miner data → confirm `miner_id` spelling and that the miner has attested at least once
+- Watch mode looks frozen → increase `--interval` and test one-shot mode first
