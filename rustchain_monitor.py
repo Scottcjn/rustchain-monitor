@@ -10,6 +10,14 @@ Features:
 - Hardware multiplier validation
 - Network health checks
 - Alert system for epoch settlements
+- Color-coded status output (green/yellow/red)
+
+Color Support:
+- Green: Healthy/Online
+- Yellow: Warning/Degraded
+- Red: Down/Error
+- Falls back gracefully if terminal doesn't support colors
+- Respects NO_COLOR environment variable
 
 Usage:
     python3 rustchain_monitor.py --node https://50.28.86.131
@@ -20,8 +28,51 @@ import requests
 import time
 import argparse
 import json
+import os
 from datetime import datetime
 from typing import Dict, List, Optional
+
+# ANSI Color Codes
+class Colors:
+    """ANSI color codes for terminal output"""
+    GREEN = '\033[92m'    # Healthy/Online
+    RED = '\033[91m'      # Down/Error
+    YELLOW = '\033[93m'   # Warning/Degraded
+    BLUE = '\033[94m'     # Info
+    BOLD = '\033[1m'
+    RESET = '\033[0m'
+    
+    @classmethod
+    def supports_color(cls):
+        """Check if terminal supports colors"""
+        # Check if we're in a terminal
+        if not hasattr(sys.stdout, 'isatty'):
+            return False
+        if not sys.stdout.isatty():
+            return False
+        
+        # Check for NO_COLOR environment variable
+        if os.getenv('NO_COLOR'):
+            return False
+            
+        # Check for TERM variable
+        term = os.getenv('TERM', '')
+        if term == 'dumb':
+            return False
+            
+        return True
+
+# Import sys for color support check
+import sys
+
+# Initialize color support flag
+USE_COLORS = Colors.supports_color()
+
+def colorize(text: str, color: str) -> str:
+    """Apply color to text if supported, otherwise return plain text"""
+    if USE_COLORS:
+        return f"{color}{text}{Colors.RESET}"
+    return text
 
 class RustChainMonitor:
     def __init__(self, node_url: str = "https://50.28.86.131"):
@@ -110,16 +161,16 @@ class RustChainMonitor:
                     
                     print(f"║  Hardware: {arch:<43}  ║")
                     print(f"║  Expected: ~{expected:.6f} RTC/epoch{' ' * 19}  ║")
-                    print(f"║  Status:   {'✅ Active' if time.time() - last_attest < 3600 else '⚠️  Inactive':<43}  ║")
+                    print(f"║  Status:   {colorize('✅ Active', Colors.GREEN) if time.time() - last_attest < 3600 else colorize('⚠️  Inactive', Colors.YELLOW):<43}  ║")
                 else:
-                    print(f"║  Status:   ⚠️  Not found in active miners{' ' * 13}  ║")
+                    print(f"║  Status:   {colorize('⚠️  Not found in active miners', Colors.YELLOW):<43}  ║")
                 
                 print(f"╚═══════════════════════════════════════════════════════╝")
                 
                 # Check for new epoch
                 if current_epoch > last_epoch and last_epoch > 0:
                     reward = balance - last_balance
-                    print(f"\n🎉 NEW EPOCH! Earned: {reward:.6f} RTC")
+                    print(f"\n{colorize('🎉 NEW EPOCH!', Colors.GREEN)} Earned: {colorize(f'{reward:.6f} RTC', Colors.YELLOW)}")
                 
                 last_balance = balance
                 last_epoch = current_epoch
@@ -130,7 +181,7 @@ class RustChainMonitor:
                 print("\n\n👋 Monitoring stopped")
                 break
             except Exception as e:
-                print(f"\n❌ Error: {e}")
+                print(f"\n{colorize('❌ Error:', Colors.RED)} {e}")
                 time.sleep(interval)
     
     def network_summary(self):
@@ -142,7 +193,7 @@ class RustChainMonitor:
         print("╔════════════════════════════════════════╗")
         print("║      RustChain Network Summary         ║")
         print("╠════════════════════════════════════════╣")
-        print(f"║  Node:    {health.get('ok', False) and '✅ Healthy' or '❌ Down'}               ║")
+        print(f"║  Node:    {colorize('✅ Healthy', Colors.GREEN) if health.get('ok', False) else colorize('❌ Down', Colors.RED):<30} ║")
         print(f"║  Epoch:   {epoch.get('current_epoch', 'N/A'):<30} ║")
         print(f"║  Miners:  {len(miners)} active{' ' * 20} ║")
         print("╚════════════════════════════════════════╝\n")
