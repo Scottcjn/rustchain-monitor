@@ -168,3 +168,13 @@ curl -sS "https://YOUR-NODE/epoch"
 - `Connection refused` or timeout → check node URL, firewall, and HTTPS/TLS settings
 - Empty miner data → confirm `miner_id` spelling and that the miner has attested at least once
 - Watch mode looks frozen → increase `--interval` and test one-shot mode first
+
+---
+
+<div align="center">
+
+**[Elyan Labs](https://github.com/Scottcjn)** · 1,882 commits · 97 repos · 1,334 stars · $0 raised
+
+[⭐ Star Rustchain](https://github.com/Scottcjn/Rustchain) · [📊 Q1 2026 Traction Report](https://github.com/Scottcjn/Rustchain/blob/main/docs/DEVELOPER_TRACTION_Q1_2026.md) · [Follow @Scottcjn](https://github.com/Scottcjn)
+
+</div>
