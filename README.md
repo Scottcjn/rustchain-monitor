@@ -46,9 +46,38 @@ python3 rustchain_monitor.py --node https://custom-node.com --miner your-id --wa
 
 ## Example Output
 
+### Network Summary Mode
+
+```bash
+$ python3 rustchain_monitor.py
+```
+
+```
+╔════════════════════════════════════════╗
+║      RustChain Network Summary         ║
+╠════════════════════════════════════════╣
+║  Node:    ✅ Healthy                   ║
+║  Epoch:   142                          ║
+║  Miners:  47 active                    ║
+╚════════════════════════════════════════╝
+
+Hardware Distribution:
+  g4              : 12 miners
+  g5              : 8 miners
+  power8          : 15 miners
+  apple_silicon   : 7 miners
+  modern          : 5 miners
+```
+
+### Miner Watch Mode
+
+```bash
+$ python3 rustchain_monitor.py --miner dual-g4-125 --watch
+```
+
 ```
 ╔═══════════════════════════════════════════════════════╗
-║  RustChain Miner Monitor - 2026-02-13 18:30:00        ║
+║  RustChain Miner Monitor - 2026-03-02 11:25:00        ║
 ╠═══════════════════════════════════════════════════════╣
 ║  Miner ID: dual-g4-125                                ║
 ║  Balance:  12.450000 RTC                              ║
@@ -61,6 +90,16 @@ python3 rustchain_monitor.py --node https://custom-node.com --miner your-id --wa
 
 🎉 NEW EPOCH! Earned: 0.382150 RTC
 ```
+
+### Color-Coded Status (with terminal support)
+
+| Status | Color | Meaning |
+|--------|-------|---------|
+| ✅ Healthy / Active | Green | Everything working normally |
+| ⚠️ Warning / Degraded | Yellow | Partial issues detected |
+| ❌ Down / Error | Red | Connection failed or critical error |
+
+> 💡 **Tip**: Colors are enabled by default in modern terminals. Set `NO_COLOR=1` to disable.
 
 ## About RustChain
 
