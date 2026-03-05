@@ -178,3 +178,21 @@ curl -sS "https://YOUR-NODE/epoch"
 [⭐ Star Rustchain](https://github.com/Scottcjn/Rustchain) · [📊 Q1 2026 Traction Report](https://github.com/Scottcjn/Rustchain/blob/main/docs/DEVELOPER_TRACTION_Q1_2026.md) · [Follow @Scottcjn](https://github.com/Scottcjn)
 
 </div>
+
+## Example output
+
+```text
+$ rustchain-monitor --host https://50.28.86.131
+
+RustChain Monitor
+================
+Status:          OK
+Node health:     ✅ healthy
+Active miners:   9
+Attestation:     3 nodes
+Last update:     2026-03-05T12:34:56Z
+
+Tips:
+- If health is failing, try: curl -sk https://50.28.86.131/health
+- To see miners:          curl -sk https://50.28.86.131/api/miners
+```
