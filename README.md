@@ -1,104 +1,172 @@
-# RustChain Network Monitor
+# RustChain Backup Verification Script
 
-[![BCOS Certified](https://img.shields.io/badge/BCOS-Certified-brightgreen?style=flat&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0id2hpdGUiPjxwYXRoIGQ9Ik0xMiAxTDMgNXY2YzAgNS41NSAzLjg0IDEwLjc0IDkgMTIgNS4xNi0xLjI2IDktNi40NSA5LTEyVjVsLTktNHptLTIgMTZsLTQtNCA1LjQxLTUuNDEgMS40MSAxLjQxTDEwIDE0bDYtNiAxLjQxIDEuNDFMMTAgMTd6Ii8+PC9zdmc+)](BCOS.md)
-**By Sophia Elya** - Real-time monitoring tool for RustChain Proof-of-Antiquity blockchain
-
-A lightweight Python tool for monitoring RustChain nodes, miners, and epoch rewards in real-time.
+Automated script to verify SQLite backup integrity and prevent silent data loss.
 
 ## Features
 
-✅ **Live Epoch Tracking** - Watch epoch settlements as they happen  
-✅ **Miner Status Dashboard** - Monitor your vintage hardware miners  
-✅ **Reward Calculator** - Estimate earnings based on hardware multipliers  
-✅ **Network Health** - Check node status and active miner count  
-✅ **Hardware Distribution** - See which vintage machines are mining  
-✅ **Alert System** - Get notified when new epochs settle  
+- ✅ SQLite integrity check (`PRAGMA integrity_check`)
+- ✅ Verifies key tables exist and have data
+- ✅ Compares row counts with live DB
+- ✅ Checks for recent attestations
+- ✅ Handles missing backups gracefully
+- ✅ Colored output for easy reading
+- ✅ Exit codes for cron alerting (0=PASS, 1=FAIL)
+- ✅ Non-destructive (never modifies backups or live DB)
 
-## Quick Start
+## Installation
 
 ```bash
-# Install dependencies
-pip install requests
+# Copy script to RustChain directory
+cp verify_backup.sh /root/rustchain/
+chmod +x /root/rustchain/verify_backup.sh
 
-# Check network summary
-python3 rustchain_monitor.py
-
-# Watch your miner (live updates every 60 seconds)
-python3 rustchain_monitor.py --miner your-miner-id --watch
-
-# Custom node and update interval
-python3 rustchain_monitor.py --node https://custom-node.com --miner your-id --watch --interval 30
+# Test run
+/root/rustchain/verify_backup.sh
 ```
 
-## Hardware Multipliers
+## Usage
 
-| Hardware | Multiplier | Expected Reward/Epoch |
-|----------|------------|----------------------|
-| PowerPC G4 | 2.5x | ~2.5x share |
-| PowerPC G5 | 2.0x | ~2.0x share |
-| PowerPC G3 | 1.8x | ~1.8x share |
-| IBM POWER8 | 1.5x | ~1.5x share |
-| Vintage x86 | 1.4x | ~1.4x share |
-| Apple Silicon | 1.2x | ~1.2x share |
-| Modern | 1.0x | 1.0x share |
+### Manual Run
 
-*Base reward: 1.5 RTC per epoch (~10 minutes)*
+```bash
+# Verify latest backup
+./verify_backup.sh
 
-## Example Output
-
-```
-╔═══════════════════════════════════════════════════════╗
-║  RustChain Miner Monitor - 2026-02-13 18:30:00        ║
-╠═══════════════════════════════════════════════════════╣
-║  Miner ID: dual-g4-125                                ║
-║  Balance:  12.450000 RTC                              ║
-║  Epoch:    142                                        ║
-╠═══════════════════════════════════════════════════════╣
-║  Hardware: g4                                         ║
-║  Expected: ~0.375000 RTC/epoch                        ║
-║  Status:   ✅ Active                                  ║
-╚═══════════════════════════════════════════════════════╝
-
-🎉 NEW EPOCH! Earned: 0.382150 RTC
+# Verify specific backup
+./verify_backup.sh /path/to/backup.db
 ```
 
-## About RustChain
+### Automated (Cron)
 
-RustChain is a blockchain that rewards vintage hardware miners using Proof-of-Antiquity consensus. Instead of rewarding the fastest hardware (like Bitcoin), we reward the *oldest* genuine hardware.
+Add to crontab for daily verification:
 
-Hardware fingerprinting prevents VM/emulator fraud, ensuring only real vintage machines earn the antiquity multipliers.
+```bash
+# Run daily at 6 AM
+0 6 * * * /root/rustchain/verify_backup.sh >> /var/log/backup_verify.log 2>&1
 
-**Learn more**: [rustchain.org](https://rustchain.org)
+# Run every 6 hours
+0 */6 * * * /root/rustchain/verify_backup.sh >> /var/log/backup_verify.log 2>&1
+```
 
-## API Endpoints Used
+### With Email Alerts
 
-- `GET /health` - Node health check
-- `GET /epoch` - Current epoch info
-- `GET /api/miners` - Active miners list
-- `GET /wallet/balance?miner_id=X` - Miner balance
+```bash
+# Install mailutils if not already installed
+apt-get install mailutils
 
-## Contributing
+# Add to crontab with email on failure
+0 6 * * * /root/rustchain/verify_backup.sh || echo "Backup verification failed!" | mail -s "RustChain Backup Alert" admin@example.com
+```
 
-Found a bug? Want to add features? PRs welcome!
+## Configuration
 
-Ideas for contributions:
-- Grafana dashboard export
-- Discord/Telegram notifications
-- Historical reward tracking
-- Multi-node monitoring
-- Export to CSV/JSON
+Environment variables (optional):
+
+```bash
+# Backup directory (default: /root/rustchain/backups)
+export BACKUP_DIR="/custom/backup/path"
+
+# Live DB path (default: /root/rustchain/rustchain_v2.db)
+export LIVE_DB="/custom/db/path/rustchain_v2.db"
+
+# Run verification
+./verify_backup.sh
+```
+
+## Output Example
+
+```
+=========================================
+RustChain Backup Verification
+=========================================
+
+[2026-03-08 01:30:01] Backup: /root/rustchain/backups/rustchain_v2_20260308.db
+[2026-03-08 01:30:01] Size: 45M
+[2026-03-08 01:30:01] Copying backup to temp location...
+[2026-03-08 01:30:02] Running integrity check...
+[2026-03-08 01:30:03] ✅ Integrity check: PASS
+[2026-03-08 01:30:03] Checking key tables...
+[2026-03-08 01:30:03] ✅ Table 'balances': 282 rows
+[2026-03-08 01:30:03] ✅ Table 'headers': 13680 rows
+[2026-03-08 01:30:03] ✅ Table 'ledger': 5420 rows
+[2026-03-08 01:30:03] ✅ Recent attestations: 18
+[2026-03-08 01:30:03] Comparing with live DB...
+[2026-03-08 01:30:04] ✅ Table 'balances': backup=282, live=282 (diff: 0) ✅
+[2026-03-08 01:30:04] ✅ Table 'headers': backup=13680, live=13685 (diff: 5) ✅
+
+[2026-03-08 01:30:04] ✅ RESULT: PASS - Backup is valid ✅
+```
+
+## Checks Performed
+
+### 1. Integrity Check
+- Runs `PRAGMA integrity_check` on backup
+- Ensures no corruption
+
+### 2. Table Verification
+- `balances` - Must have rows with positive amounts
+- `headers` - Must have block headers
+- `ledger` - Must have transactions
+- `miner_attest_recent` or `attestations` - Must have recent data
+
+### 3. Row Count Comparison
+- Compares backup vs live DB
+- Allows up to 1000 rows difference (≈1 epoch)
+- Alerts if backup is too far behind
+
+### 4. Recent Data Check
+- Verifies attestations within last 24 hours
+- Ensures backup is not too old
+
+## Exit Codes
+
+- `0` - PASS: Backup is valid
+- `1` - FAIL: One or more checks failed
+
+## Error Handling
+
+- Gracefully handles missing backup files
+- Handles missing live DB (skips comparison)
+- Handles missing tables (tries alternatives)
+- Never modifies original files
+- Cleans up temp files on exit
+
+## Requirements
+
+- Bash 4.0+
+- SQLite3
+- Ubuntu/Debian Linux
+- Read access to backup directory
+- Read access to live DB (optional, for comparison)
+
+## Security
+
+- Non-destructive: Never writes to backup or live DB
+- Uses temporary directory for all operations
+- Cleans up temp files automatically
+- No network access required
+
+## Troubleshooting
+
+### "No backup files found"
+- Check `BACKUP_DIR` path
+- Ensure backups exist and are readable
+
+### "Live DB not found"
+- Set `LIVE_DB` environment variable
+- Or run without comparison (still validates backup)
+
+### "Table not found"
+- Database schema may differ
+- Script tries alternative table names
+- Check SQLite schema: `sqlite3 backup.db ".schema"`
 
 ## License
 
-MIT License - Free to use, modify, and distribute
+MIT
 
----
+## Author
 
-**Created by Sophia Elya** | [BoTTube](https://bottube.ai/sophia-elya) | [@RustchainPOA](https://x.com/RustchainPOA)
+Created for RustChain Bounty #755 (10 RTC)
 
-## Future Enhancements
-
-- Multi-miner dashboard
-- Export to Prometheus/Grafana
-- Email/SMS alerts
-- Web UI interface
+**RTC Wallet**: RTCf4c3ff0e8443fb3c420fa7c23e7fef36cde61cab
