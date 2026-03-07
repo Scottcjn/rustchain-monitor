@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RustChain Node Monitor</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0f172a; color: #e2e8f0; min-height: 100vh; padding: 20px;
+        }
+        h1 { text-align: center; margin-bottom: 30px; }
+        .nodes { display: grid; gap: 20px; max-width: 1200px; margin: 0 auto; }
+        @media (min-width: 768px) { .nodes { grid-template-columns: repeat(3, 1fr); } }
+        
+        .node {
+            background: #1e293b; border-radius: 12px; padding: 20px;
+            border: 1px solid #334155;
+        }
+        .node-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
+        .node-name { font-size: 18px; font-weight: 600; }
+        .status { padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+        .status.up { background: #166534; color: #4ade80; }
+        .status.down { background: #991b1b; color: #f87171; }
+        .status.degraded { background: #854d0e; color: #facc15; }
+        
+        .metric { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #334155; }
+        .metric:last-child { border: none; }
+        .metric-label { color: #94a3b8; }
+        .metric-value { font-weight: 600; }
+        
+        .timestamp { text-align: center; color: #64748b; margin-top: 20px; font-size: 14px; }
+    </style>
+</head>
+<body>
+    <h1>🔷 RustChain Node Monitor</h1>
+    <div class="nodes" id="nodes"></div>
+    <p class="timestamp">Last updated: <span id="lastUpdate">-</span></p>
+
+    <script>
+        const NODES = [
+            { name: 'Node 1 (Primary)', url: 'https://50.28.86.131', role: 'Primary' },
+            { name: 'Node 2 (Secondary)', url: 'https://50.28.86.153', role: 'Secondary' },
+            { name: 'Node 3 (External)', url: 'http://100.88.109.32:8099', role: 'External' }
+        ];
+
+        async function fetchNodeData(node) {
+            try {
+                const resp = await fetch(node.url + '/health', { 
+                    method: 'GET',
+                    mode: 'cors',
+                    signal: timeout(5000)
+                });
+                const data = await resp.json();
+                return { status: 'up', data, error: null };
+            } catch (e) {
+                return { status: 'down', data: null, error: e.message };
+            }
+        }
+
+        function timeout(ms) {
+            return new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), ms);
+        }
+
+        function renderNode(node, result) {
+            const statusClass = result.status === 'up' ? 'up' : result.status === 'degraded' ? 'degraded' : 'down';
+            const statusText = result.status === 'up' ? '🟢 Up' : result.status === 'degraded' ? '🟡 Degraded' : '🔴 Down';
+            
+            let metrics = '';
+            if (result.status === 'up' && result.data) {
+                metrics = `
+                    <div class="metric"><span class="metric-label">Version</span><span class="metric-value">${result.data.version || 'N/A'}</span></div>
+                    <div class="metric"><span class="metric-label">Uptime</span><span class="metric-value">${result.data.uptime || 'N/A'}</span></div>
+                    <div class="metric"><span class="metric-label">Block Height</span><span class="metric-value">${result.data.blockHeight || result.data.height || 'N/A'}</span></div>
+                    <div class="metric"><span class="metric-label">Database</span><span class="metric-value">${result.data.database || result.data.db_status || 'N/A'}</span></div>
+                    <div class="metric"><span class="metric-label">Backup Age</span><span class="metric-value">${result.data.backup_age || result.data.backupAge || 'N/A'}</span></div>
+                    <div class="metric"><span class="metric-label">Tip Age</span><span class="metric-value">${result.data.tip_age || result.data.tipAge || 'N/A'}</span></div>
+                    <div class="metric"><span class="metric-label">Active Miners</span><span class="metric-value">${result.data.active_miners || result.data.miners || 'N/A'}</span></div>
+                    <div class="metric"><span class="metric-label">Current Epoch</span><span class="metric-value">${result.data.epoch || 'N/A'}</span></div>
+                `;
+            } else {
+                metrics = `<div class="metric"><span class="metric-label">Error</span><span class="metric-value">${result.error || 'Connection failed'}</span></div>`;
+            }
+
+            return `
+                <div class="node">
+                    <div class="node-header">
+                        <span class="node-name">${node.name}</span>
+                        <span class="status ${statusClass}">${statusText}</span>
+                    </div>
+                    ${metrics}
+                </div>
+            `;
+        }
+
+        async function updateDashboard() {
+            const results = await Promise.all(NODES.map(node => fetchNodeData(node)));
+            const html = NODES.map((node, i) => renderNode(node, results[i])).join('');
+            document.getElementById('nodes').innerHTML = html;
+            document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
+        }
+
+        updateDashboard();
+        setInterval(updateDashboard, 30000);
+    </script>
+</body>
+</html>
