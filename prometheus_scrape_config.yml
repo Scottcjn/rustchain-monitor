@@ -1,0 +1,21 @@
+# Add to your prometheus.yml under scrape_configs:
+# This tells Prometheus to scrape RustChain metrics every 60 seconds.
+
+scrape_configs:
+  - job_name: 'rustchain_primary'
+    scrape_interval: 60s
+    scrape_timeout: 10s
+    static_configs:
+      - targets: ['localhost:9101']
+        labels:
+          instance: 'rustchain-primary'
+          node_url: 'https://50.28.86.131'
+
+  # To monitor multiple nodes, run one exporter per node:
+  # - job_name: 'rustchain_backup'
+  #   scrape_interval: 60s
+  #   static_configs:
+  #     - targets: ['localhost:9102']
+  #       labels:
+  #         instance: 'rustchain-backup'
+  #         node_url: 'https://50.28.86.153'

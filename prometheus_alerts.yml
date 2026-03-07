@@ -1,0 +1,88 @@
+# RustChain Prometheus Alert Rules
+# File: rustchain_alerts.yml
+# Usage: Place in your Prometheus rules directory and reload config.
+#        prometheus.yml: rule_files: ['rustchain_alerts.yml']
+
+groups:
+  - name: rustchain_node
+    interval: 1m
+    rules:
+      # Node down
+      - alert: RustChainNodeDown
+        expr: rustchain_node_up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "RustChain node is DOWN"
+          description: "Node {{ $labels.instance }} has been unreachable for >2 minutes."
+
+      # Epoch stuck — no progress in 30 minutes
+      - alert: RustChainEpochStuck
+        expr: changes(rustchain_epoch_current[30m]) == 0 and rustchain_node_up == 1
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "RustChain epoch appears stuck"
+          description: "Epoch {{ $value }} has not advanced in 30 minutes on {{ $labels.instance }}."
+
+      # No active miners
+      - alert: RustChainNoActiveMiners
+        expr: rustchain_miners_active == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "RustChain has no active miners"
+          description: "Zero active miners detected for >5 minutes on {{ $labels.instance }}."
+
+      # DB growing too fast (>1GB)
+      - alert: RustChainDatabaseLarge
+        expr: rustchain_db_size_bytes > 1073741824
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "RustChain database exceeds 1 GB"
+          description: "Database size is {{ humanizeBytes $value }} on {{ $labels.instance }}."
+
+      # Backup stale (>24h)
+      - alert: RustChainBackupStale
+        expr: rustchain_backup_age_hours > 24
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "RustChain backup is stale"
+          description: "Last backup was {{ $value }} hours ago on {{ $labels.instance }}."
+
+      # Backup very stale (>6h warning)
+      - alert: RustChainBackupWarning
+        expr: rustchain_backup_age_hours > 6
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "RustChain backup may be overdue"
+          description: "Last backup was {{ $value }} hours ago on {{ $labels.instance }}."
+
+      # API latency spike (>2s p95)
+      - alert: RustChainAPISlowdown
+        expr: histogram_quantile(0.95, rate(rustchain_api_request_duration_seconds_bucket[5m])) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "RustChain API p95 latency exceeds 2s"
+          description: "Endpoint {{ $labels.endpoint }} p95 latency is {{ $value }}s on {{ $labels.instance }}."
+
+      # High scrape error rate
+      - alert: RustChainMetricsScrapeErrors
+        expr: rate(rustchain_metrics_scrape_errors_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "RustChain metrics scrape errors detected"
+          description: "Scrape error rate for {{ $labels.endpoint }} is {{ $value }}/s on {{ $labels.instance }}."
