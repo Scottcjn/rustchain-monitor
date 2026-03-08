@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RustChain Node Health Dashboard</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --card: #161b22;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --muted: #8b949e;
+    --green: #3fb950;
+    --yellow: #d29922;
+    --red: #f85149;
+    --blue: #58a6ff;
+    --purple: #bc8cff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    padding: 20px;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 24px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  header h1 { font-size: 1.4rem; font-weight: 700; }
+  header h1 span { color: var(--blue); }
+  .refresh-info { font-size: 0.8rem; color: var(--muted); }
+  .nodes-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+  .node-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+    transition: border-color 0.3s;
+  }
+  .node-card.up    { border-top: 3px solid var(--green); }
+  .node-card.down  { border-top: 3px solid var(--red); }
+  .node-card.loading { border-top: 3px solid var(--yellow); }
+  .node-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 16px;
+  }
+  .node-title { font-size: 1rem; font-weight: 600; }
+  .node-role { font-size: 0.75rem; color: var(--muted); margin-top: 2px; }
+  .status-badge {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    padding: 4px 10px;
+    border-radius: 20px;
+  }
+  .status-badge.up     { background: rgba(63,185,80,0.15);  color: var(--green); }
+  .status-badge.down   { background: rgba(248,81,73,0.15);  color: var(--red); }
+  .status-badge.loading { background: rgba(210,153,34,0.15); color: var(--yellow); }
+  .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+  }
+  .dot.up      { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .dot.down    { background: var(--red); }
+  .dot.loading { background: var(--yellow); animation: pulse 1s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+  .metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .metric { }
+  .metric label { font-size: 0.72rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  .metric value { display: block; font-size: 0.9rem; font-weight: 500; margin-top: 2px; font-family: 'Courier New', monospace; }
+  .metric value.good    { color: var(--green); }
+  .metric value.warn    { color: var(--yellow); }
+  .metric value.bad     { color: var(--red); }
+  .metric value.neutral { color: var(--text); }
+  .node-url { font-size: 0.72rem; color: var(--muted); margin-top: 12px; font-family: monospace; }
+  .last-check { font-size: 0.72rem; color: var(--muted); margin-top: 4px; }
+  .error-msg { color: var(--red); font-size: 0.8rem; margin-top: 8px; font-family: monospace; }
+
+  /* History section */
+  .history-section {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+    margin-bottom: 24px;
+  }
+  .history-section h2 { font-size: 1rem; font-weight: 600; margin-bottom: 16px; color: var(--blue); }
+  .uptime-bars { display: flex; flex-direction: column; gap: 12px; }
+  .uptime-row { display: flex; align-items: center; gap: 12px; }
+  .uptime-row .node-label { width: 100px; font-size: 0.8rem; color: var(--muted); flex-shrink: 0; }
+  .bar-track { flex: 1; height: 20px; background: var(--bg); border-radius: 4px; overflow: hidden; position: relative; }
+  .bar-fill { height: 100%; border-radius: 4px; transition: width 0.5s; }
+  .uptime-pct { width: 50px; font-size: 0.8rem; text-align: right; font-family: monospace; }
+
+  /* Summary row */
+  .summary { display: flex; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }
+  .summary-stat {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 18px;
+    flex: 1; min-width: 120px;
+  }
+  .summary-stat .stat-label { font-size: 0.72rem; color: var(--muted); text-transform: uppercase; }
+  .summary-stat .stat-value { font-size: 1.6rem; font-weight: 700; margin-top: 4px; }
+  .summary-stat .stat-value.green  { color: var(--green); }
+  .summary-stat .stat-value.yellow { color: var(--yellow); }
+  .summary-stat .stat-value.red    { color: var(--red); }
+
+  footer { text-align: center; color: var(--muted); font-size: 0.75rem; margin-top: 24px; }
+  footer a { color: var(--blue); text-decoration: none; }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>⛓️ RustChain <span>Node Dashboard</span></h1>
+    <div class="refresh-info" id="refreshInfo">Auto-refresh every 30s</div>
+  </div>
+  <button onclick="fetchAll()" style="background:var(--blue);color:#000;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-weight:600;">↻ Refresh</button>
+</header>
+
+<div class="summary" id="summary">
+  <div class="summary-stat">
+    <div class="stat-label">Nodes Online</div>
+    <div class="stat-value" id="statOnline">—</div>
+  </div>
+  <div class="summary-stat">
+    <div class="stat-label">Total Miners</div>
+    <div class="stat-value green" id="statMiners">—</div>
+  </div>
+  <div class="summary-stat">
+    <div class="stat-label">Network Version</div>
+    <div class="stat-value" id="statVersion" style="font-size:1rem;margin-top:8px;font-family:monospace;">—</div>
+  </div>
+  <div class="summary-stat">
+    <div class="stat-label">Last Updated</div>
+    <div class="stat-value" id="statTime" style="font-size:0.95rem;margin-top:8px;">—</div>
+  </div>
+</div>
+
+<div class="nodes-grid" id="nodesGrid"></div>
+
+<div class="history-section">
+  <h2>📊 Session Uptime Tracker</h2>
+  <div class="uptime-bars" id="uptimeBars"></div>
+</div>
+
+<footer>
+  RustChain Node Dashboard · 
+  <a href="https://github.com/Scottcjn/Rustchain" target="_blank">GitHub</a> · 
+  Built for <a href="https://github.com/Scottcjn/rustchain-bounties/issues/752" target="_blank">Bounty #752</a> ·
+  Wallet: nox-ventures
+</footer>
+
+<script>
+const NODES = [
+  {
+    id: 'node1',
+    name: 'Node 1',
+    role: 'Primary',
+    url: 'https://50.28.86.131',
+    healthUrl: 'https://50.28.86.131/health',
+    minersUrl: 'https://50.28.86.131/api/miners',
+    epochUrl: 'https://50.28.86.131/epoch',
+  },
+  {
+    id: 'node2',
+    name: 'Node 2',
+    role: 'Secondary',
+    url: 'https://50.28.86.153',
+    healthUrl: 'https://50.28.86.153/health',
+    minersUrl: 'https://50.28.86.153/api/miners',
+    epochUrl: 'https://50.28.86.153/epoch',
+  },
+  {
+    id: 'node3',
+    name: 'Node 3',
+    role: 'External (Tailscale)',
+    url: 'http://100.88.109.32:8099',
+    healthUrl: 'http://100.88.109.32:8099/health',
+    minersUrl: 'http://100.88.109.32:8099/api/miners',
+    epochUrl: 'http://100.88.109.32:8099/epoch',
+  },
+];
+
+// Session history for uptime tracking
+const history = {};
+NODES.forEach(n => { history[n.id] = { checks: 0, up: 0 }; });
+
+let refreshInterval = null;
+
+function formatUptime(seconds) {
+  if (!seconds && seconds !== 0) return '—';
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  if (d > 0) return `${d}d ${h}h ${m}m`;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m ${s}s`;
+}
+
+function formatTime(ts) {
+  if (!ts) return '—';
+  return new Date(ts * 1000).toLocaleTimeString();
+}
+
+function uptimeClass(pct) {
+  if (pct >= 95) return '#3fb950';
+  if (pct >= 80) return '#d29922';
+  return '#f85149';
+}
+
+async function fetchNodeData(node) {
+  const timeout = 8000;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeout);
+
+  try {
+    const [healthRes, minersRes, epochRes] = await Promise.allSettled([
+      fetch(node.healthUrl, { signal: ctrl.signal, mode: 'cors' }),
+      fetch(node.minersUrl, { signal: ctrl.signal, mode: 'cors' }),
+      fetch(node.epochUrl,  { signal: ctrl.signal, mode: 'cors' }),
+    ]);
+    clearTimeout(timer);
+
+    let health = null, miners = null, epoch = null;
+
+    if (healthRes.status === 'fulfilled' && healthRes.value.ok) {
+      health = await healthRes.value.json();
+    }
+    if (minersRes.status === 'fulfilled' && minersRes.value.ok) {
+      try { miners = await minersRes.value.json(); } catch {}
+    }
+    if (epochRes.status === 'fulfilled' && epochRes.value.ok) {
+      try { epoch = await epochRes.value.json(); } catch {}
+    }
+
+    if (!health || !health.ok) {
+      return { status: 'down', error: 'Health check failed or returned not-ok' };
+    }
+
+    return {
+      status: 'up',
+      version: health.version || '—',
+      uptime: health.uptime,
+      db: health.db || '—',
+      backupAge: health.backup_age_hours,
+      tipAge: health.tip_age_slots,
+      minerCount: Array.isArray(miners) ? miners.length : (miners?.count ?? '—'),
+      epoch: epoch?.epoch ?? '—',
+      raw: health,
+    };
+  } catch (err) {
+    clearTimeout(timer);
+    return { status: 'down', error: err.message || 'Connection refused / timeout' };
+  }
+}
+
+function renderCard(node, data) {
+  const isUp = data.status === 'up';
+  const isLoading = data.status === 'loading';
+  const cls = isLoading ? 'loading' : isUp ? 'up' : 'down';
+  const badge = isLoading ? '⏳ Checking...' : isUp ? '🟢 Online' : '🔴 Offline';
+  const dotCls = cls;
+
+  const dbOk = data.db && (data.db === 'rw' || data.db.includes('rw'));
+  const backupOk = data.backupAge !== undefined && data.backupAge < 2;
+  const tipOk = data.tipAge !== undefined && data.tipAge < 100;
+
+  return `
+    <div class="node-card ${cls}" id="card-${node.id}">
+      <div class="node-header">
+        <div>
+          <div class="node-title">${node.name}</div>
+          <div class="node-role">${node.role}</div>
+        </div>
+        <div class="status-badge ${cls}">
+          <span class="dot ${dotCls}"></span>
+          ${isLoading ? 'Checking…' : isUp ? 'Online' : 'Offline'}
+        </div>
+      </div>
+      ${isUp ? `
+      <div class="metrics">
+        <div class="metric">
+          <label>Version</label>
+          <value class="neutral">${data.version}</value>
+        </div>
+        <div class="metric">
+          <label>Uptime</label>
+          <value class="${data.uptime > 3600 ? 'good' : 'warn'}">${formatUptime(data.uptime)}</value>
+        </div>
+        <div class="metric">
+          <label>Database</label>
+          <value class="${dbOk ? 'good' : 'bad'}">${data.db}</value>
+        </div>
+        <div class="metric">
+          <label>Active Miners</label>
+          <value class="${data.minerCount > 0 ? 'good' : 'warn'}">${data.minerCount}</value>
+        </div>
+        <div class="metric">
+          <label>Backup Age</label>
+          <value class="${backupOk ? 'good' : data.backupAge < 6 ? 'warn' : 'bad'}">${data.backupAge != null ? data.backupAge.toFixed(1) + 'h' : '—'}</value>
+        </div>
+        <div class="metric">
+          <label>Tip Age</label>
+          <value class="${tipOk ? 'good' : data.tipAge < 500 ? 'warn' : 'bad'}">${data.tipAge != null ? data.tipAge + ' slots' : '—'}</value>
+        </div>
+        <div class="metric">
+          <label>Epoch</label>
+          <value class="neutral">${data.epoch}</value>
+        </div>
+      </div>
+      ` : `
+      <div class="error-msg">⚠ ${data.error || 'Node unreachable'}</div>
+      `}
+      <div class="node-url">${node.url}</div>
+      <div class="last-check">Last check: ${new Date().toLocaleTimeString()}</div>
+    </div>
+  `;
+}
+
+async function fetchAll() {
+  const grid = document.getElementById('nodesGrid');
+
+  // Show loading state
+  if (!grid.innerHTML) {
+    grid.innerHTML = NODES.map(n => renderCard(n, { status: 'loading' })).join('');
+  }
+
+  const results = await Promise.all(NODES.map(fetchNodeData));
+
+  // Update history
+  results.forEach((r, i) => {
+    const h = history[NODES[i].id];
+    h.checks++;
+    if (r.status === 'up') h.up++;
+  });
+
+  // Update cards
+  grid.innerHTML = results.map((r, i) => renderCard(NODES[i], r)).join('');
+
+  // Update summary
+  const onlineCount = results.filter(r => r.status === 'up').length;
+  const totalMiners = results.reduce((s, r) => s + (r.minerCount && typeof r.minerCount === 'number' ? r.minerCount : 0), 0);
+  const versions = [...new Set(results.filter(r => r.version).map(r => r.version))];
+
+  const onlineEl = document.getElementById('statOnline');
+  onlineEl.textContent = `${onlineCount}/${NODES.length}`;
+  onlineEl.className = 'stat-value ' + (onlineCount === NODES.length ? 'green' : onlineCount > 0 ? 'yellow' : 'red');
+  document.getElementById('statMiners').textContent = totalMiners || '—';
+  document.getElementById('statVersion').textContent = versions.join(', ') || '—';
+  document.getElementById('statTime').textContent = new Date().toLocaleTimeString();
+
+  // Update uptime bars
+  const barsEl = document.getElementById('uptimeBars');
+  barsEl.innerHTML = NODES.map((n, i) => {
+    const h = history[n.id];
+    const pct = h.checks > 0 ? Math.round((h.up / h.checks) * 100) : 0;
+    const color = uptimeClass(pct);
+    return `
+      <div class="uptime-row">
+        <span class="node-label">${n.name} <span style="color:var(--muted);font-size:0.7em">(${n.role})</span></span>
+        <div class="bar-track">
+          <div class="bar-fill" style="width:${pct}%;background:${color}"></div>
+        </div>
+        <span class="uptime-pct" style="color:${color}">${pct}%</span>
+      </div>
+    `;
+  }).join('');
+
+  document.getElementById('refreshInfo').textContent =
+    `Auto-refresh every 30s · Last: ${new Date().toLocaleTimeString()}`;
+}
+
+// Init
+fetchAll();
+refreshInterval = setInterval(fetchAll, 30000);
+</script>
+</body>
+</html>
