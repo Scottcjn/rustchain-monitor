@@ -181,6 +181,31 @@ curl -sS "https://YOUR-NODE/epoch"
 
 ## Example output
 
+### Network Summary
+
+```text
+$ python3 rustchain_monitor.py
+
+╔════════════════════════════════════════════╗
+║      RustChain Network Summary         ║
+╠════════════════════════════════════════════╣
+║  Node:    ✅ Healthy                      ║
+║  Epoch:   N/A                            ║
+║  Miners:  19 active                  ║
+╚════════════════════════════════════════════╝
+
+Hardware Distribution:
+  modern          : 11 miners
+  apple_silicon   : 2 miners
+  g4              : 2 miners
+  M4              : 1 miners
+  M1              : 1 miners
+  Intel64 Family 6 Model 42 Stepping 7, GenuineIntel : 1 miners
+  AMD64 Family 23 Model 96 Stepping 1, AuthenticAMD : 1 miners
+```
+
+### Node Health Check
+
 ```text
 $ rustchain-monitor --host https://50.28.86.131
 
