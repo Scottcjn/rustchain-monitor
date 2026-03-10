@@ -13,6 +13,8 @@ A lightweight Python tool for monitoring RustChain nodes, miners, and epoch rewa
 ✅ **Network Health** - Check node status and active miner count  
 ✅ **Hardware Distribution** - See which vintage machines are mining  
 ✅ **Alert System** - Get notified when new epochs settle  
+✅ **Historical Reward Tracking** - Persist miner balance history to SQLite  
+✅ **CSV Export + Comparisons** - Export snapshots and compare miners over time  
 
 ## Quick Start
 
@@ -28,6 +30,18 @@ python3 rustchain_monitor.py --miner your-miner-id --watch
 
 # Custom node and update interval
 python3 rustchain_monitor.py --node https://custom-node.com --miner your-id --watch --interval 30
+
+# Record miner history while watching
+python3 rustchain_monitor.py --miner your-miner-id --watch --record-history
+
+# Print a historical reward summary from the local SQLite history DB
+python3 rustchain_monitor.py --miner your-miner-id --history-summary
+
+# Compare multiple miners over the last 7 days
+python3 rustchain_monitor.py --compare miner-a,miner-b --history-days 7
+
+# Export one miner's stored history to CSV
+python3 rustchain_monitor.py --miner your-miner-id --export-csv rewards.csv
 ```
 
 ## Hardware Multipliers
@@ -119,6 +133,26 @@ Hardware fingerprinting prevents VM/emulator fraud, ensuring only real vintage m
 - `GET /api/miners` - Active miners list
 - `GET /wallet/balance?miner_id=X` - Miner balance
 
+## Historical Tracking
+
+The monitor can now persist miner balance snapshots into a local SQLite database:
+
+- default DB path: `~/.rustchain-monitor/history.db`
+- enable recording with `--record-history`
+- print a stored summary with `--history-summary`
+- compare multiple miners with `--compare miner-a,miner-b`
+- export stored rows with `--export-csv rewards.csv`
+
+Example:
+
+```bash
+# Collect history during watch mode
+python3 rustchain_monitor.py --miner vintage-g4-mac --watch --record-history
+
+# Later, inspect the trend
+python3 rustchain_monitor.py --miner vintage-g4-mac --history-summary --history-days 30
+```
+
 ## Contributing
 
 Found a bug? Want to add features? PRs welcome!
@@ -126,7 +160,6 @@ Found a bug? Want to add features? PRs welcome!
 Ideas for contributions:
 - Grafana dashboard export
 - Discord/Telegram notifications
-- Historical reward tracking
 - Multi-node monitoring
 - Export to CSV/JSON
 
