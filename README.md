@@ -17,6 +17,7 @@ A lightweight Python tool for monitoring RustChain nodes, miners, and epoch rewa
 ✅ **CSV Export + Comparisons** - Export snapshots and compare miners over time  
 ✅ **Prometheus Metrics Endpoint** - Expose live node and local history metrics on `/metrics`  
 ✅ **Grafana JSON Export** - Write Grafana-friendly snapshot JSON for file/JSON datasources  
+✅ **Multi-Node Fleet Export** - Scrape Node 1, Node 2, and Node 3 together with disagreement gauges  
 
 ## Quick Start
 
@@ -50,6 +51,18 @@ python3 rustchain_monitor.py --export-grafana-json grafana/rustchain-monitor.jso
 
 # Serve Prometheus metrics for Grafana/Prometheus scraping
 python3 rustchain_monitor.py --prometheus-listen 127.0.0.1:9108
+
+# Inspect the default RustChain node fleet
+python3 rustchain_monitor.py --all-nodes
+
+# Export the default node fleet for Grafana
+python3 rustchain_monitor.py --all-nodes --export-grafana-json grafana/rustchain-fleet.json
+
+# Serve multi-node Prometheus metrics
+python3 rustchain_monitor.py --all-nodes --prometheus-listen 127.0.0.1:9108
+
+# Use a custom node list instead of the built-in fleet
+python3 rustchain_monitor.py --nodes-config nodes.example.json --export-grafana-json /tmp/custom-fleet.json
 ```
 
 ## Hardware Multipliers
@@ -174,6 +187,13 @@ Prometheus metrics include:
 - active miner count and hardware distribution
 - locally recorded miner history gauges when `~/.rustchain-monitor/history.db` contains snapshots
 
+For fleet mode, add `--all-nodes` or `--nodes-config path.json`. The exporter then emits:
+
+- per-node metrics with `node_id`, `node_name`, `node_role`, and `node_url` labels
+- aggregate fleet gauges such as `rustchain_nodes_scrape_ok_total`
+- disagreement gauges like `rustchain_network_epoch_disagreement`
+- max/min observed miner-count gauges instead of incorrectly summing network-wide counts across nodes
+
 Example:
 
 ```bash
@@ -182,9 +202,13 @@ python3 rustchain_monitor.py --prometheus-listen 127.0.0.1:9108
 
 # Export a point-in-time JSON payload for Grafana Infinity / JSON API
 python3 rustchain_monitor.py --export-grafana-json /tmp/rustchain-monitor.json
+
+# Export the default RustChain fleet
+python3 rustchain_monitor.py --all-nodes --export-grafana-json /tmp/rustchain-fleet.json
 ```
 
 An example Prometheus-backed Grafana dashboard is included at [dashboard/grafana-rustchain-monitor.json](dashboard/grafana-rustchain-monitor.json).
+For fleet mode, use [dashboard/grafana-rustchain-fleet.json](dashboard/grafana-rustchain-fleet.json).
 
 ## Epoch Alerts
 

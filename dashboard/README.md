@@ -18,7 +18,7 @@ A single-page HTML dashboard monitoring all 3 RustChain attestation nodes in rea
 | Node | URL | Role |
 |------|-----|------|
 | Node 1 | `https://50.28.86.131` | Primary |
-| Node 2 | `https://50.28.86.153` | Secondary |
+| Node 2 | `http://50.28.86.153:8099` | Secondary |
 | Node 3 | `http://100.88.109.32:8099` | External (Tailscale) |
 
 ## Usage
@@ -48,6 +48,12 @@ python3 rustchain_monitor.py --export-grafana-json /tmp/rustchain-monitor.json
 ```
 
 That payload is shaped for Grafana JSON / Infinity-style datasources and includes `series`, `tables`, and the raw snapshot payload.
+
+For the built-in 3-node fleet exporter, import `dashboard/grafana-rustchain-fleet.json` and run:
+
+```bash
+python3 rustchain_monitor.py --all-nodes --prometheus-listen 127.0.0.1:9108
+```
 
 ## APIs Used
 

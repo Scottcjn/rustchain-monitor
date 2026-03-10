@@ -1,0 +1,22 @@
+{
+  "nodes": [
+    {
+      "node_id": "node1",
+      "name": "Node 1",
+      "role": "Primary",
+      "url": "https://50.28.86.131"
+    },
+    {
+      "node_id": "node2",
+      "name": "Node 2",
+      "role": "Secondary",
+      "url": "http://50.28.86.153:8099"
+    },
+    {
+      "node_id": "node3",
+      "name": "Node 3",
+      "role": "External (Tailscale)",
+      "url": "http://100.88.109.32:8099"
+    }
+  ]
+}

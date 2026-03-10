@@ -89,7 +89,7 @@ def test_render_prometheus_metrics_emits_expected_lines(tmp_path):
 
     assert "# HELP rustchain_node_health_ok" in body
     assert 'rustchain_node_health_ok{node_url="https://node.example",version="2.2.1-rip200"} 1' in body
-    assert 'rustchain_hardware_miners{device_arch="g4",node_url="https://node.example"} 1' in body
+    assert 'rustchain_hardware_miners{device_arch="g4",node_url="https://node.example",version="2.2.1-rip200"} 1' in body
     assert 'rustchain_history_gain_7d_rtc{device_arch="g4",miner_id="miner-a",node_url="https://node.example"} 2.5' in body
 
 

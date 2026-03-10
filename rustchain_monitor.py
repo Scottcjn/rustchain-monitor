@@ -36,10 +36,73 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 DEFAULT_HISTORY_DB = Path.home() / ".rustchain-monitor" / "history.db"
+DEFAULT_NODE_URL = "https://50.28.86.131"
+DEFAULT_MULTI_NODE_TARGETS = [
+    {
+        "node_id": "node1",
+        "name": "Node 1",
+        "role": "Primary",
+        "url": DEFAULT_NODE_URL,
+    },
+    {
+        "node_id": "node2",
+        "name": "Node 2",
+        "role": "Secondary",
+        "url": "http://50.28.86.153:8099",
+    },
+    {
+        "node_id": "node3",
+        "name": "Node 3",
+        "role": "External (Tailscale)",
+        "url": "http://100.88.109.32:8099",
+    },
+]
 
 
 def _history_db_path(db_path: str | Path) -> Path:
     return Path(db_path).expanduser()
+
+
+def _slugify_node_text(value: str, fallback: str = "node") -> str:
+    slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in str(value or fallback))
+    slug = "-".join(part for part in slug.split("-") if part)
+    return slug or fallback
+
+
+def normalize_node_target(raw_target: dict, *, index: int = 0) -> dict:
+    url = str(raw_target.get("url") or "").strip().rstrip("/")
+    if not url:
+        raise ValueError("node target url is required")
+
+    name = str(raw_target.get("name") or raw_target.get("node_name") or f"Node {index + 1}").strip()
+    role = str(raw_target.get("role") or raw_target.get("node_role") or "").strip()
+    node_id = str(raw_target.get("node_id") or _slugify_node_text(name, fallback=f"node-{index + 1}")).strip()
+
+    return {
+        "node_id": node_id,
+        "name": name,
+        "role": role,
+        "url": url,
+    }
+
+
+def default_multi_node_targets() -> list[dict]:
+    return [normalize_node_target(target, index=index) for index, target in enumerate(DEFAULT_MULTI_NODE_TARGETS)]
+
+
+def load_node_targets(config_path: str | Path) -> list[dict]:
+    config_file = Path(config_path).expanduser()
+    with open(config_file) as handle:
+        loaded = json.load(handle)
+
+    rows = loaded.get("nodes") if isinstance(loaded, dict) else loaded
+    if not isinstance(rows, list):
+        raise ValueError("node config must be a list or a dict with a 'nodes' list")
+
+    targets = [normalize_node_target(row, index=index) for index, row in enumerate(rows)]
+    if not targets:
+        raise ValueError("node config must contain at least one node target")
+    return targets
 
 
 def history_db_exists(db_path: str | Path) -> bool:
@@ -448,15 +511,66 @@ def _append_metric(metrics: list[dict], name: str, value, labels: Optional[dict]
     metrics.append({"name": name, "value": value, "labels": labels or {}})
 
 
-def build_export_metrics(snapshot: dict, history_summaries: Optional[list[dict]] = None) -> list[dict]:
-    summary = snapshot["summary"]
-    labels = {
-        "node_url": snapshot["node_url"],
-        "version": summary.get("version", "unknown") or "unknown",
-    }
-    metrics: list[dict] = []
+def _merge_labels(*label_sets: Optional[dict]) -> dict:
+    merged = {}
+    for label_set in label_sets:
+        for key, value in (label_set or {}).items():
+            if value is None or value == "":
+                continue
+            merged[key] = value
+    return merged
 
-    _append_metric(metrics, "rustchain_export_generated_timestamp", snapshot.get("generated_at_ts"), {"node_url": snapshot["node_url"]})
+
+def _node_metric_base_labels(snapshot: dict) -> dict:
+    summary = snapshot.get("summary", {})
+    return _merge_labels(
+        {
+            "node_url": snapshot.get("node_url"),
+            "version": summary.get("version", "unknown") or "unknown",
+        },
+        {
+            "node_id": snapshot.get("node_id"),
+            "node_name": snapshot.get("node_name"),
+            "node_role": snapshot.get("node_role"),
+        },
+    )
+
+
+def build_history_export_metrics(history_summaries: Optional[list[dict]] = None, *, base_labels: Optional[dict] = None) -> list[dict]:
+    metrics: list[dict] = []
+    for summary_row in history_summaries or []:
+        history_labels = _merge_labels(
+            base_labels,
+            {
+                "miner_id": summary_row["miner_id"],
+                "device_arch": summary_row.get("latest_arch", "unknown") or "unknown",
+            },
+        )
+        _append_metric(metrics, "rustchain_history_snapshots", summary_row.get("snapshots"), history_labels)
+        _append_metric(metrics, "rustchain_history_balance_rtc", summary_row.get("latest_balance"), history_labels)
+        _append_metric(metrics, "rustchain_history_gain_1d_rtc", summary_row.get("daily_gain_1d"), history_labels)
+        _append_metric(metrics, "rustchain_history_gain_7d_rtc", summary_row.get("daily_gain_7d"), history_labels)
+        _append_metric(metrics, "rustchain_history_gain_30d_rtc", summary_row.get("daily_gain_30d"), history_labels)
+        _append_metric(metrics, "rustchain_history_active", summary_row.get("latest_active"), history_labels)
+        _append_metric(metrics, "rustchain_history_last_seen_timestamp", summary_row.get("last_seen"), history_labels)
+    return metrics
+
+
+def build_node_export_metrics(snapshot: dict) -> list[dict]:
+    summary = snapshot.get("summary", {})
+    labels = _node_metric_base_labels(snapshot)
+    generated_labels = _merge_labels(
+        {"node_url": snapshot.get("node_url")},
+        {
+            "node_id": snapshot.get("node_id"),
+            "node_name": snapshot.get("node_name"),
+            "node_role": snapshot.get("node_role"),
+        },
+    )
+
+    metrics: list[dict] = []
+    _append_metric(metrics, "rustchain_export_generated_timestamp", snapshot.get("generated_at_ts"), generated_labels)
+    _append_metric(metrics, "rustchain_node_scrape_ok", summary.get("scrape_ok", summary.get("node_ok")), labels)
     _append_metric(metrics, "rustchain_node_health_ok", summary.get("node_ok"), labels)
     _append_metric(metrics, "rustchain_node_db_rw", summary.get("db_rw"), labels)
     _append_metric(metrics, "rustchain_epoch_current", summary.get("epoch_current"), labels)
@@ -470,31 +584,70 @@ def build_export_metrics(snapshot: dict, history_summaries: Optional[list[dict]]
             metrics,
             "rustchain_hardware_miners",
             count,
-            {
-                "node_url": snapshot["node_url"],
-                "device_arch": arch,
-            },
+            _merge_labels(labels, {"device_arch": arch}),
         )
 
-    for summary_row in history_summaries or []:
-        history_labels = {
-            "node_url": snapshot["node_url"],
-            "miner_id": summary_row["miner_id"],
-            "device_arch": summary_row.get("latest_arch", "unknown") or "unknown",
-        }
-        _append_metric(metrics, "rustchain_history_snapshots", summary_row.get("snapshots"), history_labels)
-        _append_metric(metrics, "rustchain_history_balance_rtc", summary_row.get("latest_balance"), history_labels)
-        _append_metric(metrics, "rustchain_history_gain_1d_rtc", summary_row.get("daily_gain_1d"), history_labels)
-        _append_metric(metrics, "rustchain_history_gain_7d_rtc", summary_row.get("daily_gain_7d"), history_labels)
-        _append_metric(metrics, "rustchain_history_gain_30d_rtc", summary_row.get("daily_gain_30d"), history_labels)
-        _append_metric(metrics, "rustchain_history_active", summary_row.get("latest_active"), history_labels)
-        _append_metric(metrics, "rustchain_history_last_seen_timestamp", summary_row.get("last_seen"), history_labels)
+    return metrics
 
+
+def build_aggregate_export_metrics(snapshots: list[dict]) -> list[dict]:
+    metrics: list[dict] = []
+    summary_rows = [snapshot.get("summary", {}) for snapshot in snapshots]
+    scrape_ok_rows = [summary for summary in summary_rows if summary.get("scrape_ok")]
+    healthy_rows = [summary for summary in summary_rows if summary.get("node_ok")]
+    epochs = [summary.get("epoch_current") for summary in scrape_ok_rows if summary.get("epoch_current") is not None]
+    miner_counts = [summary.get("active_miners") for summary in scrape_ok_rows if summary.get("active_miners") is not None]
+    backup_ages = [summary.get("backup_age_hours") for summary in scrape_ok_rows if summary.get("backup_age_hours") is not None]
+    tip_ages = [summary.get("tip_age_slots") for summary in scrape_ok_rows if summary.get("tip_age_slots") is not None]
+
+    _append_metric(metrics, "rustchain_export_generated_timestamp", max((snapshot.get("generated_at_ts") or 0) for snapshot in snapshots) if snapshots else time.time(), {"export_scope": "multi_node"})
+    _append_metric(metrics, "rustchain_nodes_configured_total", len(snapshots), {"export_scope": "multi_node"})
+    _append_metric(metrics, "rustchain_nodes_scrape_ok_total", len(scrape_ok_rows), {"export_scope": "multi_node"})
+    _append_metric(metrics, "rustchain_nodes_healthy_total", len(healthy_rows), {"export_scope": "multi_node"})
+
+    if epochs:
+        _append_metric(metrics, "rustchain_network_epoch_max", max(epochs), {"export_scope": "multi_node"})
+        _append_metric(metrics, "rustchain_network_epoch_min", min(epochs), {"export_scope": "multi_node"})
+        _append_metric(metrics, "rustchain_network_epoch_disagreement", max(epochs) - min(epochs), {"export_scope": "multi_node"})
+
+    if miner_counts:
+        _append_metric(metrics, "rustchain_network_active_miners_max", max(miner_counts), {"export_scope": "multi_node"})
+        _append_metric(metrics, "rustchain_network_active_miners_min", min(miner_counts), {"export_scope": "multi_node"})
+        _append_metric(metrics, "rustchain_network_active_miners_disagreement", max(miner_counts) - min(miner_counts), {"export_scope": "multi_node"})
+
+    if backup_ages:
+        _append_metric(metrics, "rustchain_network_backup_age_hours_max", max(backup_ages), {"export_scope": "multi_node"})
+    if tip_ages:
+        _append_metric(metrics, "rustchain_network_tip_age_slots_max", max(tip_ages), {"export_scope": "multi_node"})
+
+    version_counts = {}
+    for summary in scrape_ok_rows:
+        version = summary.get("version", "unknown") or "unknown"
+        version_counts[version] = version_counts.get(version, 0) + 1
+    for version, count in sorted(version_counts.items()):
+        _append_metric(metrics, "rustchain_network_nodes_by_version", count, {"version": version})
+
+    return metrics
+
+
+def build_export_metrics(snapshot: dict, history_summaries: Optional[list[dict]] = None) -> list[dict]:
+    return build_node_export_metrics(snapshot) + build_history_export_metrics(
+        history_summaries,
+        base_labels={"node_url": snapshot.get("node_url")},
+    )
+
+
+def build_multi_node_export_metrics(snapshots: list[dict], history_summaries: Optional[list[dict]] = None) -> list[dict]:
+    metrics = build_aggregate_export_metrics(snapshots)
+    for snapshot in snapshots:
+        metrics.extend(build_node_export_metrics(snapshot))
+    metrics.extend(build_history_export_metrics(history_summaries, base_labels={"history_scope": "local"}))
     return metrics
 
 
 PROMETHEUS_HELP = {
     "rustchain_export_generated_timestamp": "Unix timestamp when the RustChain monitor export was generated.",
+    "rustchain_node_scrape_ok": "RustChain node scrape status where 1 means all required endpoints were collected.",
     "rustchain_node_health_ok": "RustChain node health status where 1 means ok.",
     "rustchain_node_db_rw": "RustChain node database read-write health where 1 means writable.",
     "rustchain_epoch_current": "Current epoch reported by the RustChain node.",
@@ -503,6 +656,18 @@ PROMETHEUS_HELP = {
     "rustchain_node_backup_age_hours": "Age of the latest backup in hours.",
     "rustchain_node_tip_age_slots": "Age of the node chain tip in slots.",
     "rustchain_hardware_miners": "Active miner count grouped by device architecture.",
+    "rustchain_nodes_configured_total": "Number of nodes configured in the multi-node export.",
+    "rustchain_nodes_scrape_ok_total": "Number of nodes successfully scraped in the multi-node export.",
+    "rustchain_nodes_healthy_total": "Number of nodes whose /health payload is ok in the multi-node export.",
+    "rustchain_network_epoch_max": "Highest epoch observed across scraped nodes.",
+    "rustchain_network_epoch_min": "Lowest epoch observed across scraped nodes.",
+    "rustchain_network_epoch_disagreement": "Difference between highest and lowest epoch observed across scraped nodes.",
+    "rustchain_network_active_miners_max": "Highest active miner count observed across scraped nodes.",
+    "rustchain_network_active_miners_min": "Lowest active miner count observed across scraped nodes.",
+    "rustchain_network_active_miners_disagreement": "Difference between highest and lowest active miner counts observed across scraped nodes.",
+    "rustchain_network_backup_age_hours_max": "Highest backup age observed across scraped nodes.",
+    "rustchain_network_tip_age_slots_max": "Highest tip age observed across scraped nodes.",
+    "rustchain_network_nodes_by_version": "Number of scraped nodes grouped by version.",
     "rustchain_history_snapshots": "Number of locally recorded history snapshots for a miner.",
     "rustchain_history_balance_rtc": "Latest locally recorded miner balance in RTC.",
     "rustchain_history_gain_1d_rtc": "Locally recorded 1-day miner gain in RTC.",
@@ -513,8 +678,7 @@ PROMETHEUS_HELP = {
 }
 
 
-def render_prometheus_metrics(snapshot: dict, history_summaries: Optional[list[dict]] = None) -> str:
-    metrics = build_export_metrics(snapshot, history_summaries)
+def _metric_names_in_order(metrics: list[dict]) -> list[str]:
     names_in_order = []
     seen_names = set()
     for metric in metrics:
@@ -522,9 +686,12 @@ def render_prometheus_metrics(snapshot: dict, history_summaries: Optional[list[d
         if name not in seen_names:
             seen_names.add(name)
             names_in_order.append(name)
+    return names_in_order
 
+
+def render_prometheus_metrics_from_metrics(metrics: list[dict]) -> str:
     lines = []
-    for name in names_in_order:
+    for name in _metric_names_in_order(metrics):
         lines.append(f"# HELP {name} {PROMETHEUS_HELP.get(name, name)}")
         lines.append(f"# TYPE {name} gauge")
     for metric in metrics:
@@ -533,11 +700,16 @@ def render_prometheus_metrics(snapshot: dict, history_summaries: Optional[list[d
     return "\n".join(lines)
 
 
-def build_grafana_export(snapshot: dict, history_summaries: Optional[list[dict]] = None) -> dict:
-    metrics = build_export_metrics(snapshot, history_summaries)
-    ts_ms = int(float(snapshot["generated_at_ts"]) * 1000)
+def render_prometheus_metrics(snapshot: dict, history_summaries: Optional[list[dict]] = None) -> str:
+    return render_prometheus_metrics_from_metrics(build_export_metrics(snapshot, history_summaries))
 
-    series = [
+
+def render_multi_node_prometheus_metrics(snapshots: list[dict], history_summaries: Optional[list[dict]] = None) -> str:
+    return render_prometheus_metrics_from_metrics(build_multi_node_export_metrics(snapshots, history_summaries))
+
+
+def _grafana_series(metrics: list[dict], ts_ms: int) -> list[dict]:
+    return [
         {
             "target": _metric_target(metric["name"], metric["labels"]),
             "datapoints": [[metric["value"], ts_ms]],
@@ -545,13 +717,21 @@ def build_grafana_export(snapshot: dict, history_summaries: Optional[list[dict]]
         for metric in metrics
     ]
 
-    network_rows = [
-        [metric["name"], metric["value"], json.dumps(metric["labels"], sort_keys=True)]
-        for metric in metrics
-        if not metric["name"].startswith("rustchain_history_")
-    ]
 
-    history_rows = [
+def _metric_table(name: str, metrics: list[dict]) -> dict:
+    return {
+        "type": "table",
+        "name": name,
+        "columns": [{"text": "metric"}, {"text": "value"}, {"text": "labels_json"}],
+        "rows": [
+            [metric["name"], metric["value"], json.dumps(metric["labels"], sort_keys=True)]
+            for metric in metrics
+        ],
+    }
+
+
+def _history_summary_table(history_summaries: Optional[list[dict]] = None) -> Optional[dict]:
+    rows = [
         [
             row["miner_id"],
             row["snapshots"],
@@ -566,44 +746,122 @@ def build_grafana_export(snapshot: dict, history_summaries: Optional[list[dict]]
         ]
         for row in history_summaries or []
     ]
+    if not rows:
+        return None
+    return {
+        "type": "table",
+        "name": "history_summaries",
+        "columns": [
+            {"text": "miner_id"},
+            {"text": "snapshots"},
+            {"text": "latest_balance"},
+            {"text": "latest_epoch"},
+            {"text": "latest_arch"},
+            {"text": "latest_active"},
+            {"text": "gain_1d_rtc"},
+            {"text": "gain_7d_rtc"},
+            {"text": "gain_30d_rtc"},
+            {"text": "last_seen_ts"},
+        ],
+        "rows": rows,
+    }
 
-    tables = [
-        {
-            "type": "table",
-            "name": "network_summary",
-            "columns": [{"text": "metric"}, {"text": "value"}, {"text": "labels_json"}],
-            "rows": network_rows,
-        }
-    ]
-    if history_rows:
-        tables.append(
-            {
-                "type": "table",
-                "name": "history_summaries",
-                "columns": [
-                    {"text": "miner_id"},
-                    {"text": "snapshots"},
-                    {"text": "latest_balance"},
-                    {"text": "latest_epoch"},
-                    {"text": "latest_arch"},
-                    {"text": "latest_active"},
-                    {"text": "gain_1d_rtc"},
-                    {"text": "gain_7d_rtc"},
-                    {"text": "gain_30d_rtc"},
-                    {"text": "last_seen_ts"},
-                ],
-                "rows": history_rows,
-            }
-        )
+
+def build_grafana_export(snapshot: dict, history_summaries: Optional[list[dict]] = None) -> dict:
+    metrics = build_export_metrics(snapshot, history_summaries)
+    ts_ms = int(float(snapshot["generated_at_ts"]) * 1000)
+
+    tables = [_metric_table("network_summary", [metric for metric in metrics if not metric["name"].startswith("rustchain_history_")])]
+    history_table = _history_summary_table(history_summaries)
+    if history_table:
+        tables.append(history_table)
 
     return {
         "generated_at": snapshot["generated_at"],
         "generated_at_ts": snapshot["generated_at_ts"],
         "node_url": snapshot["node_url"],
         "datasource_format": "grafana-simple-json-timeseries",
-        "series": series,
+        "series": _grafana_series(metrics, ts_ms),
         "tables": tables,
         "snapshot": snapshot,
+        "history_summaries": history_summaries or [],
+    }
+
+
+def build_multi_node_grafana_export(snapshots: list[dict], history_summaries: Optional[list[dict]] = None) -> dict:
+    generated_at_ts = max((snapshot.get("generated_at_ts") or 0) for snapshot in snapshots) if snapshots else time.time()
+    generated_at = datetime.fromtimestamp(generated_at_ts, timezone.utc).isoformat().replace("+00:00", "Z")
+    metrics = build_multi_node_export_metrics(snapshots, history_summaries)
+    ts_ms = int(float(generated_at_ts) * 1000)
+
+    aggregate_metric_names = {
+        "rustchain_nodes_configured_total",
+        "rustchain_nodes_scrape_ok_total",
+        "rustchain_nodes_healthy_total",
+        "rustchain_network_epoch_max",
+        "rustchain_network_epoch_min",
+        "rustchain_network_epoch_disagreement",
+        "rustchain_network_active_miners_max",
+        "rustchain_network_active_miners_min",
+        "rustchain_network_active_miners_disagreement",
+        "rustchain_network_backup_age_hours_max",
+        "rustchain_network_tip_age_slots_max",
+        "rustchain_network_nodes_by_version",
+    }
+    aggregate_metrics = [metric for metric in metrics if metric["name"] in aggregate_metric_names]
+    node_metrics = [
+        metric
+        for metric in metrics
+        if metric["labels"].get("node_url") and not metric["name"].startswith("rustchain_history_")
+    ]
+
+    tables = [
+        _metric_table("aggregate_summary", aggregate_metrics),
+        _metric_table("node_metrics", node_metrics),
+        {
+            "type": "table",
+            "name": "node_snapshots",
+            "columns": [
+                {"text": "node_id"},
+                {"text": "node_name"},
+                {"text": "node_role"},
+                {"text": "node_url"},
+                {"text": "scrape_ok"},
+                {"text": "node_health_ok"},
+                {"text": "version"},
+                {"text": "epoch_current"},
+                {"text": "active_miners"},
+                {"text": "error"},
+            ],
+            "rows": [
+                [
+                    snapshot.get("node_id"),
+                    snapshot.get("node_name"),
+                    snapshot.get("node_role"),
+                    snapshot.get("node_url"),
+                    1 if snapshot.get("summary", {}).get("scrape_ok") else 0,
+                    1 if snapshot.get("summary", {}).get("node_ok") else 0,
+                    snapshot.get("summary", {}).get("version"),
+                    snapshot.get("summary", {}).get("epoch_current"),
+                    snapshot.get("summary", {}).get("active_miners"),
+                    snapshot.get("error", ""),
+                ]
+                for snapshot in snapshots
+            ],
+        },
+    ]
+    history_table = _history_summary_table(history_summaries)
+    if history_table:
+        tables.append(history_table)
+
+    return {
+        "generated_at": generated_at,
+        "generated_at_ts": generated_at_ts,
+        "node_urls": [snapshot.get("node_url") for snapshot in snapshots],
+        "datasource_format": "grafana-simple-json-timeseries",
+        "series": _grafana_series(metrics, ts_ms),
+        "tables": tables,
+        "snapshots": snapshots,
         "history_summaries": history_summaries or [],
     }
 
@@ -621,6 +879,71 @@ def export_grafana_json(
         json.dump(export, handle, indent=2, sort_keys=True)
         handle.write("\n")
     return len(export["series"])
+
+
+def export_multi_node_grafana_json(
+    output_path: str | Path,
+    *,
+    snapshots: list[dict],
+    history_summaries: Optional[list[dict]] = None,
+) -> int:
+    export = build_multi_node_grafana_export(snapshots, history_summaries)
+    out_path = Path(output_path).expanduser()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w") as handle:
+        json.dump(export, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    return len(export["series"])
+
+
+def build_failed_snapshot(target: dict, error: Exception | str) -> dict:
+    generated_at_ts = time.time()
+    error_text = str(error)
+    return {
+        "generated_at": datetime.fromtimestamp(generated_at_ts, timezone.utc).isoformat().replace("+00:00", "Z"),
+        "generated_at_ts": generated_at_ts,
+        "node_url": target["url"],
+        "node_id": target.get("node_id"),
+        "node_name": target.get("name"),
+        "node_role": target.get("role"),
+        "health": {},
+        "epoch": {},
+        "miners": [],
+        "summary": {
+            "node_ok": False,
+            "scrape_ok": False,
+            "version": "unreachable",
+            "epoch_current": None,
+            "active_miners": None,
+            "uptime_seconds": None,
+            "backup_age_hours": None,
+            "tip_age_slots": None,
+            "db_rw": False,
+        },
+        "hardware_distribution": {},
+        "error": error_text,
+    }
+
+
+def collect_multi_node_snapshots(node_targets: list[dict], *, history_db_path: Optional[str | Path] = None) -> list[dict]:
+    snapshots = []
+    for target in node_targets:
+        monitor = RustChainMonitor(
+            target["url"],
+            use_color=False,
+            history_db_path=history_db_path or DEFAULT_HISTORY_DB,
+        )
+        try:
+            snapshot = monitor.collect_network_snapshot()
+            snapshot["node_id"] = target.get("node_id")
+            snapshot["node_name"] = target.get("name")
+            snapshot["node_role"] = target.get("role")
+            snapshot["summary"]["scrape_ok"] = True
+            snapshot["error"] = ""
+        except Exception as exc:
+            snapshot = build_failed_snapshot(target, exc)
+        snapshots.append(snapshot)
+    return snapshots
 
 
 def parse_listen_address(listen: str) -> tuple[str, int]:
@@ -671,7 +994,7 @@ class Colors:
 class RustChainMonitor:
     def __init__(
         self,
-        node_url: str = "https://50.28.86.131",
+        node_url: str = DEFAULT_NODE_URL,
         use_color: bool = True,
         history_db_path: Optional[str | Path] = None,
     ):
@@ -866,17 +1189,28 @@ class RustChainMonitor:
     def get_recorded_history_summaries(self, days: int = 30) -> list[dict]:
         return get_recorded_history_summaries(self.history_db_path, days=days)
 
-    def export_grafana_json(self, output_path: str, days: int = 30) -> None:
-        snapshot = self.collect_network_snapshot()
+    def collect_multi_node_snapshots(self, node_targets: list[dict]) -> list[dict]:
+        return collect_multi_node_snapshots(node_targets, history_db_path=self.history_db_path)
+
+    def export_grafana_json(self, output_path: str, days: int = 30, node_targets: Optional[list[dict]] = None) -> None:
         history_summaries = self.get_recorded_history_summaries(days=days)
-        series_count = export_grafana_json(
-            output_path,
-            snapshot=snapshot,
-            history_summaries=history_summaries,
-        )
+        if node_targets:
+            snapshots = self.collect_multi_node_snapshots(node_targets)
+            series_count = export_multi_node_grafana_json(
+                output_path,
+                snapshots=snapshots,
+                history_summaries=history_summaries,
+            )
+        else:
+            snapshot = self.collect_network_snapshot()
+            series_count = export_grafana_json(
+                output_path,
+                snapshot=snapshot,
+                history_summaries=history_summaries,
+            )
         print(f"Exported {series_count} Grafana series to {output_path}")
 
-    def serve_prometheus_metrics(self, listen: str, days: int = 30) -> None:
+    def serve_prometheus_metrics(self, listen: str, days: int = 30, node_targets: Optional[list[dict]] = None) -> None:
         host, port = parse_listen_address(listen)
         monitor = self
 
@@ -898,9 +1232,13 @@ class RustChainMonitor:
                     return
 
                 try:
-                    snapshot = monitor.collect_network_snapshot()
                     history_summaries = monitor.get_recorded_history_summaries(days=days)
-                    body = render_prometheus_metrics(snapshot, history_summaries).encode()
+                    if node_targets:
+                        snapshots = monitor.collect_multi_node_snapshots(node_targets)
+                        body = render_multi_node_prometheus_metrics(snapshots, history_summaries).encode()
+                    else:
+                        snapshot = monitor.collect_network_snapshot()
+                        body = render_prometheus_metrics(snapshot, history_summaries).encode()
                     self.send_response(200)
                     self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
                     self.send_header("Content-Length", str(len(body)))
@@ -927,6 +1265,34 @@ class RustChainMonitor:
             print("\nStopping Prometheus metrics server.")
         finally:
             server.server_close()
+
+    def multi_node_summary(self, node_targets: list[dict]) -> None:
+        snapshots = self.collect_multi_node_snapshots(node_targets)
+        up_count = sum(1 for snapshot in snapshots if snapshot.get("summary", {}).get("scrape_ok"))
+        epochs = [snapshot.get("summary", {}).get("epoch_current") for snapshot in snapshots if snapshot.get("summary", {}).get("epoch_current") is not None]
+        miner_counts = [snapshot.get("summary", {}).get("active_miners") for snapshot in snapshots if snapshot.get("summary", {}).get("active_miners") is not None]
+
+        print(f"{self._accent('Multi-Node RustChain Summary')}")
+        print(f"Nodes up:   {up_count}/{len(snapshots)}")
+        if epochs:
+            print(f"Epoch span: {min(epochs)} -> {max(epochs)}")
+        if miner_counts:
+            print(f"Miner span: {min(miner_counts)} -> {max(miner_counts)}")
+        print("")
+        for snapshot in snapshots:
+            summary = snapshot.get("summary", {})
+            status = self._status("up") if summary.get("scrape_ok") else self._error("down")
+            epoch_value = summary.get("epoch_current", "n/a")
+            miner_value = summary.get("active_miners", "n/a")
+            error_text = snapshot.get("error", "")
+            print(f"{snapshot.get('node_name', snapshot.get('node_id', snapshot.get('node_url')))} ({snapshot.get('node_role', '')})")
+            print(f"  URL:    {snapshot.get('node_url')}")
+            print(f"  Status: {status}")
+            print(f"  Epoch:  {epoch_value}")
+            print(f"  Miners: {miner_value}")
+            if error_text:
+                print(f"  Error:  {error_text}")
+            print("")
     
     def watch_miner(self, miner_id: str, interval: int = 60, record_history_enabled: bool = False):
         """Watch a specific miner's status"""
@@ -1008,7 +1374,7 @@ class RustChainMonitor:
         print(f"{self._accent('║')}      {self._accent('RustChain Network Summary')}         {self._accent('║')}")
         print(f"{self._accent('╠' + '═' * 44 + '╣')}")
         print(f"{self._accent('║')}  Node:    {node_status:<30} {self._accent('║')}")
-        print(f"{self._accent('║')}  Epoch:   {self._info(str(epoch.get('current_epoch', 'N/A'))):<30} {self._accent('║')}")
+        print(f"{self._accent('║')}  Epoch:   {self._info(str(epoch.get('current_epoch', epoch.get('epoch', 'N/A')))):<30} {self._accent('║')}")
         print(f"{self._accent('║')}  Miners:  {self._status(str(len(miners)))} active{' ' * 17} {self._accent('║')}")
         print(f"{self._accent('╚' + '═' * 44 + '╝')}\n")
         
@@ -1032,7 +1398,7 @@ class RustChainMonitor:
 
 def main():
     parser = argparse.ArgumentParser(description="RustChain Network Monitor")
-    parser.add_argument("--node", default="https://50.28.86.131", help="Node URL")
+    parser.add_argument("--node", default=DEFAULT_NODE_URL, help="Node URL")
     parser.add_argument("--miner", help="Miner ID to watch")
     parser.add_argument("--watch", action="store_true", help="Watch mode (live updates)")
     parser.add_argument("--interval", type=int, default=60, help="Update interval (seconds)")
@@ -1043,11 +1409,18 @@ def main():
     parser.add_argument("--export-csv", help="Export --miner history to CSV")
     parser.add_argument("--export-grafana-json", help="Export a Grafana-friendly JSON snapshot for the current node and recorded miner history")
     parser.add_argument("--prometheus-listen", help="Serve Prometheus metrics on host:port (example: 127.0.0.1:9108)")
+    parser.add_argument("--all-nodes", action="store_true", help="Use the default RustChain node fleet for summary/export operations")
+    parser.add_argument("--nodes-config", help="JSON file containing a custom multi-node target list")
     parser.add_argument("--compare", help="Comma-separated miner IDs to compare using stored history")
     parser.add_argument("--color", dest="color", action="store_true", default=True, help="Enable colored output (default: auto-detect)")
     parser.add_argument("--no-color", dest="color", action="store_false", help="Disable colored output")
     
     args = parser.parse_args()
+    node_targets = None
+    if args.nodes_config:
+        node_targets = load_node_targets(args.nodes_config)
+    elif args.all_nodes:
+        node_targets = default_multi_node_targets()
 
     needs_history = bool(
         args.record_history
@@ -1064,9 +1437,9 @@ def main():
     )
 
     if args.prometheus_listen:
-        monitor.serve_prometheus_metrics(args.prometheus_listen, days=args.history_days)
+        monitor.serve_prometheus_metrics(args.prometheus_listen, days=args.history_days, node_targets=node_targets)
     elif args.export_grafana_json:
-        monitor.export_grafana_json(args.export_grafana_json, days=args.history_days)
+        monitor.export_grafana_json(args.export_grafana_json, days=args.history_days, node_targets=node_targets)
     elif args.compare:
         miner_ids = [miner_id.strip() for miner_id in args.compare.split(",") if miner_id.strip()]
         if not miner_ids:
@@ -1093,6 +1466,8 @@ def main():
         if args.record_history:
             saved = monitor.record_history(args.miner, snapshot)
             print(f"History snapshot: {'saved' if saved else 'unchanged'} -> {monitor.history_db_path}")
+    elif node_targets:
+        monitor.multi_node_summary(node_targets)
     else:
         monitor.network_summary()
 
