@@ -18,14 +18,21 @@ Usage:
 
 import argparse
 import csv
+import json
 import sys
 import sqlite3
 import time
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Dict, List, Optional
 
 import requests
+import urllib3
+
+
+# RustChain nodes commonly use self-signed certs in operator setups.
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 DEFAULT_HISTORY_DB = Path.home() / ".rustchain-monitor" / "history.db"
@@ -33,6 +40,10 @@ DEFAULT_HISTORY_DB = Path.home() / ".rustchain-monitor" / "history.db"
 
 def _history_db_path(db_path: str | Path) -> Path:
     return Path(db_path).expanduser()
+
+
+def history_db_exists(db_path: str | Path) -> bool:
+    return _history_db_path(db_path).exists()
 
 
 def init_history_db(db_path: str | Path) -> Path:
@@ -66,6 +77,31 @@ def _history_connection(db_path: str | Path) -> sqlite3.Connection:
     conn = sqlite3.connect(db_file)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _coerce_float(value, default: Optional[float] = 0.0) -> Optional[float]:
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_int(value, default: Optional[int] = 0) -> Optional[int]:
+    if value is None or value == "":
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _health_db_rw(health: dict) -> bool:
+    if "db_rw" in health:
+        return bool(health.get("db_rw"))
+    db_value = str(health.get("db", "") or "").lower()
+    return "rw" in db_value
 
 
 def record_history_snapshot(
@@ -359,6 +395,244 @@ def export_history_csv(
             )
     return len(rows)
 
+
+def list_recorded_miners(db_path: str | Path) -> list[str]:
+    db_file = _history_db_path(db_path)
+    if not db_file.exists():
+        return []
+    with sqlite3.connect(db_file) as conn:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT miner_id
+            FROM miner_history
+            ORDER BY miner_id ASC
+            """
+        ).fetchall()
+    return [str(row[0]) for row in rows]
+
+
+def get_recorded_history_summaries(
+    db_path: str | Path,
+    *,
+    days: int = 30,
+    now_ts: Optional[float] = None,
+) -> list[dict]:
+    db_file = _history_db_path(db_path)
+    if not db_file.exists():
+        return []
+    summaries = []
+    for miner_id in list_recorded_miners(db_file):
+        summary = get_history_summary(db_file, miner_id=miner_id, now_ts=now_ts, days=max(days, 30))
+        if summary["snapshots"] > 0:
+            summaries.append(summary)
+    summaries.sort(key=lambda row: row["miner_id"])
+    return summaries
+
+
+def _prometheus_escape(value: object) -> str:
+    return str(value).replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
+
+
+def _metric_target(name: str, labels: Optional[dict] = None) -> str:
+    if not labels:
+        return name
+    parts = [f'{key}="{_prometheus_escape(value)}"' for key, value in sorted(labels.items()) if value is not None]
+    return f"{name}{{{','.join(parts)}}}"
+
+
+def _append_metric(metrics: list[dict], name: str, value, labels: Optional[dict] = None) -> None:
+    if value is None:
+        return
+    if isinstance(value, bool):
+        value = 1 if value else 0
+    metrics.append({"name": name, "value": value, "labels": labels or {}})
+
+
+def build_export_metrics(snapshot: dict, history_summaries: Optional[list[dict]] = None) -> list[dict]:
+    summary = snapshot["summary"]
+    labels = {
+        "node_url": snapshot["node_url"],
+        "version": summary.get("version", "unknown") or "unknown",
+    }
+    metrics: list[dict] = []
+
+    _append_metric(metrics, "rustchain_export_generated_timestamp", snapshot.get("generated_at_ts"), {"node_url": snapshot["node_url"]})
+    _append_metric(metrics, "rustchain_node_health_ok", summary.get("node_ok"), labels)
+    _append_metric(metrics, "rustchain_node_db_rw", summary.get("db_rw"), labels)
+    _append_metric(metrics, "rustchain_epoch_current", summary.get("epoch_current"), labels)
+    _append_metric(metrics, "rustchain_miners_active", summary.get("active_miners"), labels)
+    _append_metric(metrics, "rustchain_node_uptime_seconds", summary.get("uptime_seconds"), labels)
+    _append_metric(metrics, "rustchain_node_backup_age_hours", summary.get("backup_age_hours"), labels)
+    _append_metric(metrics, "rustchain_node_tip_age_slots", summary.get("tip_age_slots"), labels)
+
+    for arch, count in sorted(snapshot.get("hardware_distribution", {}).items()):
+        _append_metric(
+            metrics,
+            "rustchain_hardware_miners",
+            count,
+            {
+                "node_url": snapshot["node_url"],
+                "device_arch": arch,
+            },
+        )
+
+    for summary_row in history_summaries or []:
+        history_labels = {
+            "node_url": snapshot["node_url"],
+            "miner_id": summary_row["miner_id"],
+            "device_arch": summary_row.get("latest_arch", "unknown") or "unknown",
+        }
+        _append_metric(metrics, "rustchain_history_snapshots", summary_row.get("snapshots"), history_labels)
+        _append_metric(metrics, "rustchain_history_balance_rtc", summary_row.get("latest_balance"), history_labels)
+        _append_metric(metrics, "rustchain_history_gain_1d_rtc", summary_row.get("daily_gain_1d"), history_labels)
+        _append_metric(metrics, "rustchain_history_gain_7d_rtc", summary_row.get("daily_gain_7d"), history_labels)
+        _append_metric(metrics, "rustchain_history_gain_30d_rtc", summary_row.get("daily_gain_30d"), history_labels)
+        _append_metric(metrics, "rustchain_history_active", summary_row.get("latest_active"), history_labels)
+        _append_metric(metrics, "rustchain_history_last_seen_timestamp", summary_row.get("last_seen"), history_labels)
+
+    return metrics
+
+
+PROMETHEUS_HELP = {
+    "rustchain_export_generated_timestamp": "Unix timestamp when the RustChain monitor export was generated.",
+    "rustchain_node_health_ok": "RustChain node health status where 1 means ok.",
+    "rustchain_node_db_rw": "RustChain node database read-write health where 1 means writable.",
+    "rustchain_epoch_current": "Current epoch reported by the RustChain node.",
+    "rustchain_miners_active": "Number of active miners currently returned by the node.",
+    "rustchain_node_uptime_seconds": "Node uptime in seconds.",
+    "rustchain_node_backup_age_hours": "Age of the latest backup in hours.",
+    "rustchain_node_tip_age_slots": "Age of the node chain tip in slots.",
+    "rustchain_hardware_miners": "Active miner count grouped by device architecture.",
+    "rustchain_history_snapshots": "Number of locally recorded history snapshots for a miner.",
+    "rustchain_history_balance_rtc": "Latest locally recorded miner balance in RTC.",
+    "rustchain_history_gain_1d_rtc": "Locally recorded 1-day miner gain in RTC.",
+    "rustchain_history_gain_7d_rtc": "Locally recorded 7-day miner gain in RTC.",
+    "rustchain_history_gain_30d_rtc": "Locally recorded 30-day miner gain in RTC.",
+    "rustchain_history_active": "Latest locally recorded miner activity state where 1 means active.",
+    "rustchain_history_last_seen_timestamp": "Unix timestamp of the latest locally recorded miner snapshot.",
+}
+
+
+def render_prometheus_metrics(snapshot: dict, history_summaries: Optional[list[dict]] = None) -> str:
+    metrics = build_export_metrics(snapshot, history_summaries)
+    names_in_order = []
+    seen_names = set()
+    for metric in metrics:
+        name = metric["name"]
+        if name not in seen_names:
+            seen_names.add(name)
+            names_in_order.append(name)
+
+    lines = []
+    for name in names_in_order:
+        lines.append(f"# HELP {name} {PROMETHEUS_HELP.get(name, name)}")
+        lines.append(f"# TYPE {name} gauge")
+    for metric in metrics:
+        lines.append(f"{_metric_target(metric['name'], metric['labels'])} {metric['value']}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def build_grafana_export(snapshot: dict, history_summaries: Optional[list[dict]] = None) -> dict:
+    metrics = build_export_metrics(snapshot, history_summaries)
+    ts_ms = int(float(snapshot["generated_at_ts"]) * 1000)
+
+    series = [
+        {
+            "target": _metric_target(metric["name"], metric["labels"]),
+            "datapoints": [[metric["value"], ts_ms]],
+        }
+        for metric in metrics
+    ]
+
+    network_rows = [
+        [metric["name"], metric["value"], json.dumps(metric["labels"], sort_keys=True)]
+        for metric in metrics
+        if not metric["name"].startswith("rustchain_history_")
+    ]
+
+    history_rows = [
+        [
+            row["miner_id"],
+            row["snapshots"],
+            row["latest_balance"],
+            row["latest_epoch"],
+            row["latest_arch"],
+            1 if row["latest_active"] else 0,
+            row["daily_gain_1d"],
+            row["daily_gain_7d"],
+            row["daily_gain_30d"],
+            row["last_seen"],
+        ]
+        for row in history_summaries or []
+    ]
+
+    tables = [
+        {
+            "type": "table",
+            "name": "network_summary",
+            "columns": [{"text": "metric"}, {"text": "value"}, {"text": "labels_json"}],
+            "rows": network_rows,
+        }
+    ]
+    if history_rows:
+        tables.append(
+            {
+                "type": "table",
+                "name": "history_summaries",
+                "columns": [
+                    {"text": "miner_id"},
+                    {"text": "snapshots"},
+                    {"text": "latest_balance"},
+                    {"text": "latest_epoch"},
+                    {"text": "latest_arch"},
+                    {"text": "latest_active"},
+                    {"text": "gain_1d_rtc"},
+                    {"text": "gain_7d_rtc"},
+                    {"text": "gain_30d_rtc"},
+                    {"text": "last_seen_ts"},
+                ],
+                "rows": history_rows,
+            }
+        )
+
+    return {
+        "generated_at": snapshot["generated_at"],
+        "generated_at_ts": snapshot["generated_at_ts"],
+        "node_url": snapshot["node_url"],
+        "datasource_format": "grafana-simple-json-timeseries",
+        "series": series,
+        "tables": tables,
+        "snapshot": snapshot,
+        "history_summaries": history_summaries or [],
+    }
+
+
+def export_grafana_json(
+    output_path: str | Path,
+    *,
+    snapshot: dict,
+    history_summaries: Optional[list[dict]] = None,
+) -> int:
+    export = build_grafana_export(snapshot, history_summaries)
+    out_path = Path(output_path).expanduser()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w") as handle:
+        json.dump(export, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    return len(export["series"])
+
+
+def parse_listen_address(listen: str) -> tuple[str, int]:
+    host, sep, port_text = listen.rpartition(":")
+    if not sep or not port_text:
+        raise ValueError("listen address must be in host:port format")
+    host = host or "0.0.0.0"
+    port = int(port_text)
+    if port <= 0 or port > 65535:
+        raise ValueError("port must be between 1 and 65535")
+    return host, port
+
 # ANSI color codes for terminal output
 class Colors:
     """ANSI escape codes for colored terminal output"""
@@ -452,6 +726,41 @@ class RustChainMonitor:
         """Get specific miner's RTC balance"""
         response = self.session.get(f"{self.node_url}/wallet/balance?miner_id={miner_id}")
         return response.json().get("balance_rtc", 0.0)
+
+    def collect_network_snapshot(self) -> dict:
+        """Collect a single network snapshot for export surfaces."""
+        health = self.get_health()
+        epoch = self.get_epoch()
+        miners = self.get_miners()
+        generated_at_ts = time.time()
+
+        hardware_distribution = {}
+        for miner in miners if isinstance(miners, list) else []:
+            arch = str(miner.get("device_arch") or "unknown").strip() or "unknown"
+            hardware_distribution[arch] = hardware_distribution.get(arch, 0) + 1
+
+        epoch_current = epoch.get("current_epoch", epoch.get("epoch"))
+        summary = {
+            "node_ok": bool(health.get("ok")),
+            "version": health.get("version", "unknown") or "unknown",
+            "epoch_current": _coerce_int(epoch_current, None),
+            "active_miners": len(miners) if isinstance(miners, list) else _coerce_int((miners or {}).get("count"), 0),
+            "uptime_seconds": _coerce_float(health.get("uptime_s", health.get("uptime")), None),
+            "backup_age_hours": _coerce_float(health.get("backup_age_hours"), None),
+            "tip_age_slots": _coerce_float(health.get("tip_age_slots"), None),
+            "db_rw": _health_db_rw(health),
+        }
+
+        return {
+            "generated_at": datetime.fromtimestamp(generated_at_ts, timezone.utc).isoformat().replace("+00:00", "Z"),
+            "generated_at_ts": generated_at_ts,
+            "node_url": self.node_url,
+            "health": health,
+            "epoch": epoch,
+            "miners": miners,
+            "summary": summary,
+            "hardware_distribution": hardware_distribution,
+        }
     
     def calculate_expected_reward(self, device_arch: str) -> float:
         """Calculate expected reward per epoch based on hardware"""
@@ -519,8 +828,8 @@ class RustChainMonitor:
         print(f"Latest arch:  {summary['latest_arch']}")
         print(f"Latest state: {active_text}")
         print(f"Latest bal:   {summary['latest_balance']:.6f} RTC")
-        print(f"First seen:   {datetime.utcfromtimestamp(summary['first_seen']).isoformat()}Z")
-        print(f"Last seen:    {datetime.utcfromtimestamp(summary['last_seen']).isoformat()}Z")
+        print(f"First seen:   {datetime.fromtimestamp(summary['first_seen'], timezone.utc).isoformat().replace('+00:00', 'Z')}")
+        print(f"Last seen:    {datetime.fromtimestamp(summary['last_seen'], timezone.utc).isoformat().replace('+00:00', 'Z')}")
         print(f"Total gain:   {summary['total_gain']:+.6f} RTC")
         print(f"Observed avg: {summary['observed_daily_average']:+.6f} RTC/day")
         print(f"1d gain:      {summary['daily_gain_1d']:+.6f} RTC")
@@ -553,6 +862,71 @@ class RustChainMonitor:
             days=days,
         )
         print(f"Exported {row_count} history rows to {csv_path}")
+
+    def get_recorded_history_summaries(self, days: int = 30) -> list[dict]:
+        return get_recorded_history_summaries(self.history_db_path, days=days)
+
+    def export_grafana_json(self, output_path: str, days: int = 30) -> None:
+        snapshot = self.collect_network_snapshot()
+        history_summaries = self.get_recorded_history_summaries(days=days)
+        series_count = export_grafana_json(
+            output_path,
+            snapshot=snapshot,
+            history_summaries=history_summaries,
+        )
+        print(f"Exported {series_count} Grafana series to {output_path}")
+
+    def serve_prometheus_metrics(self, listen: str, days: int = 30) -> None:
+        host, port = parse_listen_address(listen)
+        monitor = self
+
+        class PrometheusHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                route = self.path.split("?", 1)[0]
+                if route == "/healthz":
+                    body = "ok\n".encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+
+                if route != "/metrics":
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+
+                try:
+                    snapshot = monitor.collect_network_snapshot()
+                    history_summaries = monitor.get_recorded_history_summaries(days=days)
+                    body = render_prometheus_metrics(snapshot, history_summaries).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                except Exception as exc:
+                    error_body = f"error collecting metrics: {exc}\n".encode()
+                    self.send_response(500)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+                    self.send_header("Content-Length", str(len(error_body)))
+                    self.end_headers()
+                    self.wfile.write(error_body)
+
+            def log_message(self, format, *args):
+                return
+
+        server = ThreadingHTTPServer((host, port), PrometheusHandler)
+        endpoint = f"http://{host}:{port}/metrics"
+        print(f"Serving Prometheus metrics on {endpoint}")
+        print("Press Ctrl+C to stop.")
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            print("\nStopping Prometheus metrics server.")
+        finally:
+            server.server_close()
     
     def watch_miner(self, miner_id: str, interval: int = 60, record_history_enabled: bool = False):
         """Watch a specific miner's status"""
@@ -667,20 +1041,33 @@ def main():
     parser.add_argument("--history-summary", action="store_true", help="Show stored reward history for --miner")
     parser.add_argument("--history-days", type=int, default=30, help="History window in days for summaries/exports")
     parser.add_argument("--export-csv", help="Export --miner history to CSV")
+    parser.add_argument("--export-grafana-json", help="Export a Grafana-friendly JSON snapshot for the current node and recorded miner history")
+    parser.add_argument("--prometheus-listen", help="Serve Prometheus metrics on host:port (example: 127.0.0.1:9108)")
     parser.add_argument("--compare", help="Comma-separated miner IDs to compare using stored history")
     parser.add_argument("--color", dest="color", action="store_true", default=True, help="Enable colored output (default: auto-detect)")
     parser.add_argument("--no-color", dest="color", action="store_false", help="Disable colored output")
     
     args = parser.parse_args()
 
-    needs_history = bool(args.record_history or args.history_summary or args.export_csv or args.compare)
+    needs_history = bool(
+        args.record_history
+        or args.history_summary
+        or args.export_csv
+        or args.compare
+        or args.export_grafana_json
+        or args.prometheus_listen
+    )
     monitor = RustChainMonitor(
         args.node,
         use_color=args.color,
         history_db_path=args.history_db if needs_history else None,
     )
 
-    if args.compare:
+    if args.prometheus_listen:
+        monitor.serve_prometheus_metrics(args.prometheus_listen, days=args.history_days)
+    elif args.export_grafana_json:
+        monitor.export_grafana_json(args.export_grafana_json, days=args.history_days)
+    elif args.compare:
         miner_ids = [miner_id.strip() for miner_id in args.compare.split(",") if miner_id.strip()]
         if not miner_ids:
             parser.error("--compare requires at least one miner ID")

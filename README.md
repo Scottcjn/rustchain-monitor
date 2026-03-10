@@ -15,6 +15,8 @@ A lightweight Python tool for monitoring RustChain nodes, miners, and epoch rewa
 ✅ **Alert System** - Get notified when new epochs settle  
 ✅ **Historical Reward Tracking** - Persist miner balance history to SQLite  
 ✅ **CSV Export + Comparisons** - Export snapshots and compare miners over time  
+✅ **Prometheus Metrics Endpoint** - Expose live node and local history metrics on `/metrics`  
+✅ **Grafana JSON Export** - Write Grafana-friendly snapshot JSON for file/JSON datasources  
 
 ## Quick Start
 
@@ -42,6 +44,12 @@ python3 rustchain_monitor.py --compare miner-a,miner-b --history-days 7
 
 # Export one miner's stored history to CSV
 python3 rustchain_monitor.py --miner your-miner-id --export-csv rewards.csv
+
+# Export a Grafana-friendly JSON snapshot
+python3 rustchain_monitor.py --export-grafana-json grafana/rustchain-monitor.json
+
+# Serve Prometheus metrics for Grafana/Prometheus scraping
+python3 rustchain_monitor.py --prometheus-listen 127.0.0.1:9108
 ```
 
 ## Hardware Multipliers
@@ -153,15 +161,39 @@ python3 rustchain_monitor.py --miner vintage-g4-mac --watch --record-history
 python3 rustchain_monitor.py --miner vintage-g4-mac --history-summary --history-days 30
 ```
 
+## Grafana / Export
+
+The monitor now supports two observability export paths:
+
+- `--prometheus-listen 127.0.0.1:9108` serves live metrics at `/metrics`
+- `--export-grafana-json out.json` writes a Grafana-friendly JSON snapshot with `series`, `tables`, and the raw node snapshot
+
+Prometheus metrics include:
+
+- node health, epoch, uptime, backup age, tip age
+- active miner count and hardware distribution
+- locally recorded miner history gauges when `~/.rustchain-monitor/history.db` contains snapshots
+
+Example:
+
+```bash
+# Start a local metrics endpoint
+python3 rustchain_monitor.py --prometheus-listen 127.0.0.1:9108
+
+# Export a point-in-time JSON payload for Grafana Infinity / JSON API
+python3 rustchain_monitor.py --export-grafana-json /tmp/rustchain-monitor.json
+```
+
+An example Prometheus-backed Grafana dashboard is included at [dashboard/grafana-rustchain-monitor.json](dashboard/grafana-rustchain-monitor.json).
+
 ## Contributing
 
 Found a bug? Want to add features? PRs welcome!
 
 Ideas for contributions:
-- Grafana dashboard export
 - Discord/Telegram notifications
 - Multi-node monitoring
-- Export to CSV/JSON
+- Alert routing
 
 ## License
 
@@ -174,7 +206,6 @@ MIT License - Free to use, modify, and distribute
 ## Future Enhancements
 
 - Multi-miner dashboard
-- Export to Prometheus/Grafana
 - Email/SMS alerts
 - Web UI interface
 

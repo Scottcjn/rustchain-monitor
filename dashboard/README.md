@@ -27,6 +27,28 @@ Simply open `dashboard/index.html` in any browser — no build step required.
 
 Or deploy to GitHub Pages for a permanent URL.
 
+## Grafana
+
+This repo now also ships a Prometheus-backed Grafana example dashboard:
+
+- Import `dashboard/grafana-rustchain-monitor.json`
+- Run the monitor exporter with:
+
+```bash
+python3 rustchain_monitor.py --prometheus-listen 127.0.0.1:9108
+```
+
+- Point Prometheus at `http://127.0.0.1:9108/metrics`
+- In Grafana, select your Prometheus datasource and import the dashboard JSON
+
+For file-based JSON ingestion instead of Prometheus:
+
+```bash
+python3 rustchain_monitor.py --export-grafana-json /tmp/rustchain-monitor.json
+```
+
+That payload is shaped for Grafana JSON / Infinity-style datasources and includes `series`, `tables`, and the raw snapshot payload.
+
 ## APIs Used
 
 - `GET /health` — node status, version, uptime, DB, backup age, tip age
