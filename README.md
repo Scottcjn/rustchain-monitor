@@ -186,14 +186,46 @@ python3 rustchain_monitor.py --export-grafana-json /tmp/rustchain-monitor.json
 
 An example Prometheus-backed Grafana dashboard is included at [dashboard/grafana-rustchain-monitor.json](dashboard/grafana-rustchain-monitor.json).
 
+## Epoch Alerts
+
+`epoch_reporter.py` now supports real-time alert delivery for:
+
+- new epoch settlements
+- miners going offline and coming back
+- network health failures and recovery
+- reward anomalies when `reward_min` / `reward_max` thresholds are configured
+
+Supported delivery targets:
+
+- Discord webhooks
+- Slack incoming webhooks
+- Telegram Bot API
+- Moltbook posting for epoch summaries
+
+Quick start:
+
+```bash
+# Run once with Discord + Telegram
+python3 epoch_reporter.py \
+  --discord https://discord.com/api/webhooks/... \
+  --telegram-token 123456:ABCDEF \
+  --telegram-chat-id 987654321 \
+  --once
+
+# Continuous monitoring with a config file
+python3 epoch_reporter.py --config epoch_reporter.example.json
+```
+
+See [epoch_reporter.example.json](epoch_reporter.example.json) for the supported config keys.
+
 ## Contributing
 
 Found a bug? Want to add features? PRs welcome!
 
 Ideas for contributions:
-- Discord/Telegram notifications
 - Multi-node monitoring
 - Alert routing
+- Email/SMS notifications
 
 ## License
 

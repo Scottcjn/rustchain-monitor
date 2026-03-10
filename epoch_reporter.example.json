@@ -1,0 +1,16 @@
+{
+  "node": "https://50.28.86.131",
+  "poll_interval": 60,
+  "state_file": ".epoch_state.json",
+  "discord_webhook": "https://discord.com/api/webhooks/REPLACE_ME",
+  "slack_webhook": "https://hooks.slack.com/services/REPLACE_ME",
+  "telegram_bot_token": "123456789:REPLACE_ME",
+  "telegram_chat_id": "123456789",
+  "moltbook_api_key": "",
+  "moltbook_api_url": "https://moltbook.ai/api/v1",
+  "offline_polls": 2,
+  "reward_min": 1.4,
+  "reward_max": 1.6,
+  "tip_age_max": 100,
+  "backup_age_max_hours": 6.0
+}
