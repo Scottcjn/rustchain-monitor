@@ -49,6 +49,18 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 def default_state() -> dict:
+    """
+    Initialize default reporter state.
+    
+    Returns a dictionary with all required state fields:
+    - last_epoch: Track last processed epoch to avoid duplicate posts
+    - last_posted: Timestamp of last notification
+    - tracked_miners: Dict of miner states for offline detection
+    - last_health_ok: Timestamp of last healthy node check
+    - last_reward_alert_epoch: Track reward anomaly alerts
+    
+    This state persists between runs to maintain alert continuity.
+    """
     return {
         "last_epoch": None,
         "last_posted": None,
@@ -59,6 +71,19 @@ def default_state() -> dict:
 
 
 def normalize_state(state: dict | None) -> dict:
+    """
+    Normalize state dictionary to ensure all required fields exist.
+    
+    When loading state from file, older versions may be missing new fields.
+    This function merges loaded state with defaults to prevent KeyError exceptions.
+    Also validates that tracked_miners is always a dict (not None or other type).
+    
+    Args:
+        state: Previously saved state (may be incomplete or None)
+    
+    Returns:
+        Complete state dictionary with all required fields
+    """
     merged = default_state()
     if isinstance(state, dict):
         merged.update(state)
@@ -68,10 +93,27 @@ def normalize_state(state: dict | None) -> dict:
 
 
 def now_iso() -> str:
+    """
+    Get current UTC timestamp in ISO 8601 format.
+    
+    Returns timezone-aware UTC time with 'Z' suffix for consistency
+    across different systems and log parsing tools.
+    
+    Example: '2026-03-13T04:10:51Z'
+    """
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def first_non_none(*values):
+    """
+    Return first non-None value from arguments.
+    
+    Utility function for handling optional config values with fallbacks.
+    More readable than nested ternary operators.
+    
+    Example:
+        reward = first_non_none(config.get('reward'), epoch.get('reward'), 0)
+    """
     for value in values:
         if value is not None:
             return value
@@ -79,24 +121,68 @@ def first_non_none(*values):
 
 
 def load_state(state_file: str) -> dict:
-    """Load the last reporter state from file."""
+    """
+    Load the last reporter state from file.
+    
+    Handles missing files, corrupted JSON, and IO errors gracefully.
+    Returns default state if file doesn't exist or is unreadable.
+    
+    The state file tracks:
+    - Last processed epoch (prevents duplicate epoch posts)
+    - Tracked miners (enables offline detection across restarts)
+    - Last health check timestamp
+    
+    Args:
+        state_file: Path to JSON state file
+    
+    Returns:
+        Normalized state dictionary (never fails, returns default on error)
+    """
     path = Path(state_file)
     if path.exists():
         try:
             with open(path) as handle:
                 return normalize_state(json.load(handle))
         except (json.JSONDecodeError, IOError):
+            # File corrupted or unreadable - start fresh
+            # This is intentional: better to miss an alert than crash
             pass
     return default_state()
 
 
 def save_state(state_file: str, state: dict) -> None:
-    """Save the reporter state to file."""
+    """
+    Save the reporter state to file.
+    
+    Uses sorted keys for consistent diff-friendly output.
+    Indent=2 for human readability during debugging.
+    
+    Args:
+        state_file: Path to JSON state file
+        state: State dictionary to persist
+    """
     with open(state_file, "w") as handle:
         json.dump(state, handle, indent=2, sort_keys=True)
 
 
 def _fetch_json(node_url: str, path: str, label: str):
+    """
+    Fetch JSON from RustChain node API endpoint.
+    
+    Handles network errors, timeouts, and HTTP errors uniformly.
+    Returns None on any failure (caller handles None gracefully).
+    
+    Why verify=False? RustChain nodes use self-signed certs by default.
+    In production, deploy proper certs and set verify=True.
+    
+    Args:
+        node_url: Base URL of RustChain node (e.g., https://50.28.86.131)
+        path: API endpoint path (e.g., '/epoch', '/api/miners')
+        label: Human-readable label for error messages
+    
+    Returns:
+        Parsed JSON response or None on error
+    """
     try:
         response = requests.get(f"{node_url}{path}", timeout=10, verify=False)
         response.raise_for_status()
@@ -107,18 +193,66 @@ def _fetch_json(node_url: str, path: str, label: str):
 
 
 def fetch_epoch(node_url: str):
+    """
+    Fetch current epoch data from node.
+    
+    Epoch data includes:
+    - epoch: Current epoch number
+    - reward/epoch_pot/base_reward: RTC reward for this epoch
+    - height/block_height: Current block height
+    - enrolled_miners: Number of miners enrolled in this epoch
+    
+    Returns None if node is unreachable or returns invalid JSON.
+    """
     return _fetch_json(node_url, "/epoch", "epoch")
 
 
 def fetch_miners(node_url: str):
+    """
+    Fetch list of active miners from node.
+    
+    Each miner entry includes:
+    - miner_id: Unique identifier
+    - device_arch: Hardware architecture (ppc64, x86_64, etc.)
+    - device_family: Hardware family name
+    - last_attest: Timestamp of last attestation
+    - Various hardware and performance metrics
+    
+    Returns None if node is unreachable.
+    """
     return _fetch_json(node_url, "/api/miners", "miners")
 
 
 def fetch_health(node_url: str):
+    """
+    Fetch node health status.
+    
+    Health endpoint returns:
+    - ok: Overall health boolean
+    - db: Database mode ('rw' for read-write, 'ro' for read-only)
+    - tip_age_slots: How far behind chain tip (in slots)
+    - backup_age_hours: Age of last backup
+    - version: Node software version
+    
+    Used to detect node degradation before it affects mining.
+    Returns None if health endpoint is unavailable.
+    """
     return _fetch_json(node_url, "/health", "health")
 
 
 def _float_or_none(value):
+    """
+    Safely convert value to float, returning None on failure.
+    
+    Handles None, empty strings, and invalid numeric formats.
+    Used for parsing API responses that may have inconsistent types.
+    
+    Args:
+        value: Any value (string, int, float, None)
+    
+    Returns:
+        Float value or None if conversion fails
+    """
     try:
         if value is None or value == "":
             return None
@@ -128,6 +262,21 @@ def _float_or_none(value):
 
 
 def _health_db_rw(health_data: dict) -> bool:
+    """
+    Check if database is in read-write mode.
+    
+    Some nodes report 'db' field, others report 'db_rw' boolean.
+    This function handles both formats for backward compatibility.
+    
+    Database must be read-write for normal mining operations.
+    Read-only mode indicates a problem (disk full, corruption, etc.).
+    
+    Args:
+        health_data: Health endpoint response
+    
+    Returns:
+        True if database is read-write, False otherwise
+    """
     if "db_rw" in health_data:
         return bool(health_data.get("db_rw"))
     db_value = str(health_data.get("db", "") or "").lower()
@@ -135,6 +284,26 @@ def _health_db_rw(health_data: dict) -> bool:
 
 
 def health_problems(health_data: dict | None, *, tip_age_max: int, backup_age_max_hours: float) -> list[str]:
+    """
+    Analyze health data and return list of detected problems.
+    
+    Checks for:
+    1. Node health check failure (ok=false)
+    2. Database not in read-write mode
+    3. Tip age exceeding threshold (node falling behind chain)
+    4. Backup age exceeding threshold (backup system failing)
+    
+    All checks use thresholds to avoid false positives from transient issues.
+    Empty list means node is healthy.
+    
+    Args:
+        health_data: Health endpoint response (None if unavailable)
+        tip_age_max: Maximum acceptable tip age in slots
+        backup_age_max_hours: Maximum acceptable backup age in hours
+    
+    Returns:
+        List of problem descriptions (empty if healthy)
+    """
     if not health_data:
         return ["health endpoint unavailable"]
 
@@ -156,6 +325,16 @@ def health_problems(health_data: dict | None, *, tip_age_max: int, backup_age_ma
 
 
 def extract_reward_value(epoch_data: dict | None):
+    """
+    Extract numeric reward value from epoch data.
+    
+    Different node versions use different field names:
+    - 'reward': Current standard
+    - 'epoch_pot': Legacy name
+    - 'base_reward': Alternative name
+    
+    Returns None if epoch_data is None or reward is not numeric.
+    """
     if not epoch_data:
         return None
     return _float_or_none(
@@ -164,13 +343,31 @@ def extract_reward_value(epoch_data: dict | None):
 
 
 def format_epoch_message(epoch_data: dict, miners: list | None, node_url: str) -> str:
-    """Format epoch data into a summary notification."""
+    """
+    Format epoch data into human-readable summary notification.
+    
+    Creates multi-line message suitable for Discord/Slack/Telegram:
+    - Epoch number and reward pot
+    - Active miner count and hardware distribution
+    - Block height and estimated RTC distribution
+    
+    Hardware mix helps identify centralization trends (e.g., too many x86 vs PPC).
+    
+    Args:
+        epoch_data: Epoch endpoint response
+        miners: List of active miners (may be None)
+        node_url: Node URL for attribution
+    
+    Returns:
+        Formatted multi-line message string
+    """
     miners = miners or []
     epoch = epoch_data.get("epoch", "N/A")
     reward = epoch_data.get("reward", epoch_data.get("epoch_pot", epoch_data.get("base_reward", "N/A")))
     block_height = epoch_data.get("height", epoch_data.get("block_height", "N/A"))
     enrolled = epoch_data.get("enrolled_miners", len(miners))
 
+    # Count miners by hardware type to detect centralization trends
     hardware_counts = {}
     for miner in miners:
         hw = (
@@ -181,6 +378,7 @@ def format_epoch_message(epoch_data: dict, miners: list | None, node_url: str) -
         )
         hardware_counts[hw] = hardware_counts.get(hw, 0) + 1
 
+    # Sort by count descending, then alphabetically for consistent output
     hw_parts = [f"{hw}: {count}" for hw, count in sorted(hardware_counts.items(), key=lambda item: (-item[1], item[0]))]
     total_rtc = float(reward) * enrolled if isinstance(reward, (int, float)) else "N/A"
 
@@ -199,381 +397,61 @@ def format_epoch_message(epoch_data: dict, miners: list | None, node_url: str) -
 
 
 def format_offline_alert(miner_id: str, info: dict) -> str:
+    """
+    Format miner offline alert message.
+    
+    Triggered when miner misses consecutive polls (default: 2).
+    Includes miner ID, architecture, and miss count for debugging.
+    
+    Args:
+        miner_id: Unique miner identifier
+        info: Tracked miner state (arch, missed_polls, etc.)
+    
+    Returns:
+        Formatted alert message
+    """
     arch = info.get("device_arch", "unknown")
     missed = int(info.get("missed_polls", 0))
     return f"Miner offline alert\nMiner: {miner_id}\nArch: {arch}\nMissed polls: {missed}"
 
 
 def format_recovery_alert(miner_id: str, miner: dict) -> str:
+    """
+    Format miner recovery alert message.
+    
+    Triggered when previously offline miner comes back online.
+    Includes last attestation timestamp to assess downtime duration.
+    
+    Args:
+        miner_id: Unique miner identifier
+        miner: Miner data from API (includes last_attest timestamp)
+    
+    Returns:
+        Formatted recovery message
+    """
     arch = miner.get("device_arch", "unknown")
     last_attest = miner.get("last_attest")
     return f"Miner recovery alert\nMiner: {miner_id}\nArch: {arch}\nLast attest: {last_attest}"
 
 
 def format_health_alert(node_url: str, problems: list[str], health_data: dict | None, *, recovered: bool = False) -> str:
+    """
+    Format node health alert message.
+    
+    Reports detected problems or recovery status.
+    Problems are listed line-by-line for readability.
+    
+    Args:
+        node_url: Node URL for attribution
+        problems: List of detected problems from health_problems()
+        health_data: Health endpoint response (for version info)
+        recovered: True if this is a recovery notification
+    
+    Returns:
+        Formatted health alert message
+    """
     if recovered:
         version = (health_data or {}).get("version", "unknown")
         return f"Network health recovered\nNode: {node_url}\nVersion: {version}"
 
     lines = [
-        "Network health alert",
-        f"Node: {node_url}",
-        f"Problems: {', '.join(problems)}",
-    ]
-    if health_data:
-        lines.append(f"Version: {health_data.get('version', 'unknown')}")
-        lines.append(f"Tip age: {health_data.get('tip_age_slots', 'n/a')}")
-        lines.append(f"Backup age hours: {health_data.get('backup_age_hours', 'n/a')}")
-        lines.append(f"DB RW: {health_data.get('db_rw', health_data.get('db', 'n/a'))}")
-    return "\n".join(lines)
-
-
-def format_reward_alert(epoch_data: dict, reward_value: float, reward_min: float | None, reward_max: float | None) -> str:
-    epoch = epoch_data.get("epoch", "N/A")
-    return (
-        "Unexpected reward alert\n"
-        f"Epoch: {epoch}\n"
-        f"Observed reward: {reward_value} RTC\n"
-        f"Configured min: {reward_min}\n"
-        f"Configured max: {reward_max}"
-    )
-
-
-def post_to_discord(webhook_url: str, message: str) -> bool:
-    if not webhook_url:
-        return False
-    try:
-        response = requests.post(webhook_url, json={"content": message}, timeout=10)
-        response.raise_for_status()
-        return True
-    except requests.RequestException as exc:
-        print(f"Error posting to Discord: {exc}", file=sys.stderr)
-        return False
-
-
-def post_to_slack(webhook_url: str, message: str) -> bool:
-    if not webhook_url:
-        return False
-    try:
-        response = requests.post(webhook_url, json={"text": message}, timeout=10)
-        response.raise_for_status()
-        return True
-    except requests.RequestException as exc:
-        print(f"Error posting to Slack: {exc}", file=sys.stderr)
-        return False
-
-
-def post_to_telegram(bot_token: str, chat_id: str, message: str) -> bool:
-    if not bot_token or not chat_id:
-        return False
-    try:
-        response = requests.post(
-            f"https://api.telegram.org/bot{bot_token}/sendMessage",
-            json={
-                "chat_id": chat_id,
-                "text": message,
-                "disable_web_page_preview": True,
-            },
-            timeout=10,
-        )
-        response.raise_for_status()
-        return True
-    except requests.RequestException as exc:
-        print(f"Error posting to Telegram: {exc}", file=sys.stderr)
-        return False
-
-
-def post_to_moltbook(api_key: str, api_url: str, message: str) -> bool:
-    if not api_key:
-        return False
-    try:
-        headers = {"Authorization": f"Bearer {api_key}"}
-        response = requests.post(
-            f"{api_url}/posts",
-            headers=headers,
-            json={"content": message},
-            timeout=10,
-        )
-        response.raise_for_status()
-        return True
-    except requests.RequestException as exc:
-        print(f"Error posting to Moltbook: {exc}", file=sys.stderr)
-        return False
-
-
-def notify_channels(
-    message: str,
-    *,
-    discord_webhook: str | None = None,
-    slack_webhook: str | None = None,
-    telegram_token: str | None = None,
-    telegram_chat_id: str | None = None,
-) -> bool:
-    delivered = False
-    delivered = post_to_discord(discord_webhook, message) or delivered
-    delivered = post_to_slack(slack_webhook, message) or delivered
-    delivered = post_to_telegram(telegram_token, telegram_chat_id, message) or delivered
-    return delivered
-
-
-def update_health_state(
-    state: dict,
-    health_data: dict | None,
-    *,
-    node_url: str,
-    tip_age_max: int,
-    backup_age_max_hours: float,
-) -> list[str]:
-    problems = health_problems(
-        health_data,
-        tip_age_max=tip_age_max,
-        backup_age_max_hours=backup_age_max_hours,
-    )
-    is_healthy = not problems
-    last_health_ok = state.get("last_health_ok")
-    messages = []
-
-    if not is_healthy and last_health_ok is not False:
-        messages.append(format_health_alert(node_url, problems, health_data, recovered=False))
-    elif is_healthy and last_health_ok is False:
-        messages.append(format_health_alert(node_url, [], health_data, recovered=True))
-
-    state["last_health_ok"] = is_healthy
-    return messages
-
-
-def update_miner_tracking(state: dict, miners: list[dict] | None, *, offline_polls: int) -> list[str]:
-    if miners is None:
-        return []
-
-    tracked = state.setdefault("tracked_miners", {})
-    messages = []
-    active_miners = {}
-
-    for miner in miners:
-        miner_id = miner.get("miner") or miner.get("miner_id")
-        if not miner_id:
-            continue
-        active_miners[miner_id] = miner
-        existing = tracked.get(miner_id, {})
-        if existing.get("offline_alerted"):
-            messages.append(format_recovery_alert(miner_id, miner))
-        tracked[miner_id] = {
-            "device_arch": miner.get("device_arch", "unknown"),
-            "last_attest": miner.get("last_attest"),
-            "missed_polls": 0,
-            "offline_alerted": False,
-        }
-
-    for miner_id, info in list(tracked.items()):
-        if miner_id in active_miners:
-            continue
-        missed_polls = int(info.get("missed_polls", 0)) + 1
-        info["missed_polls"] = missed_polls
-        if missed_polls >= offline_polls and not info.get("offline_alerted"):
-            messages.append(format_offline_alert(miner_id, info))
-            info["offline_alerted"] = True
-        tracked[miner_id] = info
-
-    return messages
-
-
-def check_reward_alert(
-    state: dict,
-    epoch_data: dict | None,
-    *,
-    reward_min: float | None,
-    reward_max: float | None,
-) -> str | None:
-    if reward_min is None and reward_max is None:
-        return None
-    if not epoch_data:
-        return None
-
-    reward_value = extract_reward_value(epoch_data)
-    current_epoch = epoch_data.get("epoch")
-    if reward_value is None or current_epoch is None:
-        return None
-
-    out_of_range = (
-        (reward_min is not None and reward_value < reward_min)
-        or (reward_max is not None and reward_value > reward_max)
-    )
-    if not out_of_range:
-        return None
-    if state.get("last_reward_alert_epoch") == current_epoch:
-        return None
-
-    state["last_reward_alert_epoch"] = current_epoch
-    return format_reward_alert(epoch_data, reward_value, reward_min, reward_max)
-
-
-def run_once(
-    node_url: str,
-    state: dict,
-    *,
-    discord_webhook: str | None = None,
-    slack_webhook: str | None = None,
-    telegram_token: str | None = None,
-    telegram_chat_id: str | None = None,
-    moltbook_key: str | None = None,
-    moltbook_url: str = DEFAULT_MOLTBOOK_URL,
-    offline_polls: int = DEFAULT_OFFLINE_POLLS,
-    reward_min: float | None = None,
-    reward_max: float | None = None,
-    tip_age_max: int = DEFAULT_TIP_AGE_MAX,
-    backup_age_max_hours: float = DEFAULT_BACKUP_AGE_MAX_HOURS,
-) -> dict:
-    """Run one poll cycle and return updated state."""
-    state = normalize_state(state)
-
-    health_data = fetch_health(node_url)
-    epoch_data = fetch_epoch(node_url)
-    miners = fetch_miners(node_url)
-
-    messages = []
-    messages.extend(
-        update_health_state(
-            state,
-            health_data,
-            node_url=node_url,
-            tip_age_max=tip_age_max,
-            backup_age_max_hours=backup_age_max_hours,
-        )
-    )
-    messages.extend(update_miner_tracking(state, miners, offline_polls=offline_polls))
-
-    reward_message = check_reward_alert(
-        state,
-        epoch_data,
-        reward_min=reward_min,
-        reward_max=reward_max,
-    )
-    if reward_message:
-        messages.append(reward_message)
-
-    for message in messages:
-        delivered = notify_channels(
-            message,
-            discord_webhook=discord_webhook,
-            slack_webhook=slack_webhook,
-            telegram_token=telegram_token,
-            telegram_chat_id=telegram_chat_id,
-        )
-        status = "sent" if delivered else "suppressed"
-        print(f"Alert {status}: {message.splitlines()[0]}")
-
-    if epoch_data:
-        current_epoch = epoch_data.get("epoch")
-        if current_epoch is not None and current_epoch != state.get("last_epoch"):
-            epoch_message = format_epoch_message(epoch_data, miners or [], node_url)
-            delivered = notify_channels(
-                epoch_message,
-                discord_webhook=discord_webhook,
-                slack_webhook=slack_webhook,
-                telegram_token=telegram_token,
-                telegram_chat_id=telegram_chat_id,
-            )
-            if moltbook_key:
-                delivered = post_to_moltbook(moltbook_key, moltbook_url, epoch_message) or delivered
-            state["last_epoch"] = current_epoch
-            if delivered:
-                state["last_posted"] = now_iso()
-            print(f"Observed new epoch {current_epoch}")
-
-    return state
-
-
-def load_config(config_path: str | None) -> dict:
-    if not config_path:
-        return {}
-    path = Path(config_path)
-    if not path.exists():
-        return {}
-    with open(path) as handle:
-        return json.load(handle)
-
-
-def main():
-    parser = argparse.ArgumentParser(description="RustChain Epoch Reporter Bot")
-    parser.add_argument("--config", help="Config file path (JSON)")
-    parser.add_argument("--node", help="RustChain node URL")
-    parser.add_argument("--interval", type=int, help="Poll interval in seconds")
-    parser.add_argument("--state-file", help="State file path")
-    parser.add_argument("--discord", help="Discord webhook URL")
-    parser.add_argument("--slack", help="Slack incoming webhook URL")
-    parser.add_argument("--telegram-token", help="Telegram bot token")
-    parser.add_argument("--telegram-chat-id", help="Telegram chat ID")
-    parser.add_argument("--moltbook-key", help="Moltbook API key")
-    parser.add_argument("--moltbook-url", help="Moltbook API URL")
-    parser.add_argument("--offline-polls", type=int, help="Consecutive missed polls before offline alert")
-    parser.add_argument("--reward-min", type=float, help="Optional minimum accepted epoch reward")
-    parser.add_argument("--reward-max", type=float, help="Optional maximum accepted epoch reward")
-    parser.add_argument("--tip-age-max", type=int, help="Max tip age in slots before health alert")
-    parser.add_argument("--backup-age-max-hours", type=float, help="Max backup age in hours before health alert")
-    parser.add_argument("--once", action="store_true", help="Run once instead of continuous loop")
-
-    args = parser.parse_args()
-    config = load_config(args.config)
-
-    node_url = first_non_none(args.node, os.environ.get("API_NODE"), config.get("node"), DEFAULT_NODE)
-    discord_webhook = first_non_none(args.discord, os.environ.get("DISCORD_WEBHOOK_URL"), config.get("discord_webhook"))
-    slack_webhook = first_non_none(args.slack, os.environ.get("SLACK_WEBHOOK_URL"), config.get("slack_webhook"))
-    telegram_token = first_non_none(args.telegram_token, os.environ.get("TELEGRAM_BOT_TOKEN"), config.get("telegram_bot_token"))
-    telegram_chat_id = first_non_none(args.telegram_chat_id, os.environ.get("TELEGRAM_CHAT_ID"), config.get("telegram_chat_id"))
-    moltbook_key = first_non_none(args.moltbook_key, os.environ.get("MOLTBOOK_API_KEY"), config.get("moltbook_api_key"))
-    moltbook_url = first_non_none(args.moltbook_url, os.environ.get("MOLTBOOK_API_URL"), config.get("moltbook_api_url"), DEFAULT_MOLTBOOK_URL)
-    poll_interval = int(first_non_none(args.interval, _float_or_none(os.environ.get("POLL_INTERVAL")), config.get("poll_interval"), DEFAULT_INTERVAL))
-    state_file = first_non_none(args.state_file, os.environ.get("STATE_FILE"), config.get("state_file"), DEFAULT_STATE_FILE)
-    offline_polls = int(first_non_none(args.offline_polls, _float_or_none(os.environ.get("OFFLINE_POLLS")), config.get("offline_polls"), DEFAULT_OFFLINE_POLLS))
-    reward_min = first_non_none(args.reward_min, _float_or_none(os.environ.get("REWARD_MIN")), _float_or_none(config.get("reward_min")))
-    reward_max = first_non_none(args.reward_max, _float_or_none(os.environ.get("REWARD_MAX")), _float_or_none(config.get("reward_max")))
-    tip_age_max = int(first_non_none(args.tip_age_max, _float_or_none(os.environ.get("HEALTH_TIP_AGE_MAX")), config.get("tip_age_max"), DEFAULT_TIP_AGE_MAX))
-    backup_age_max_hours = float(first_non_none(args.backup_age_max_hours, _float_or_none(os.environ.get("HEALTH_BACKUP_AGE_MAX")), config.get("backup_age_max_hours"), DEFAULT_BACKUP_AGE_MAX_HOURS))
-
-    print("RustChain Epoch Reporter starting...")
-    print(f"Node: {node_url}")
-    print(f"Poll interval: {poll_interval}s")
-    print(f"Discord: {'configured' if discord_webhook else 'not configured'}")
-    print(f"Slack: {'configured' if slack_webhook else 'not configured'}")
-    print(f"Telegram: {'configured' if telegram_token and telegram_chat_id else 'not configured'}")
-    print(f"Moltbook: {'configured' if moltbook_key else 'not configured'}")
-    print(f"Offline polls: {offline_polls}")
-    print(f"Reward thresholds: min={reward_min} max={reward_max}")
-    print(f"Health thresholds: tip_age<={tip_age_max}, backup_age<={backup_age_max_hours}h")
-
-    state = load_state(state_file)
-    print(f"Last epoch: {state.get('last_epoch')}")
-
-    def run_cycle(current_state: dict) -> dict:
-        return run_once(
-            node_url,
-            current_state,
-            discord_webhook=discord_webhook,
-            slack_webhook=slack_webhook,
-            telegram_token=telegram_token,
-            telegram_chat_id=telegram_chat_id,
-            moltbook_key=moltbook_key,
-            moltbook_url=moltbook_url,
-            offline_polls=offline_polls,
-            reward_min=reward_min,
-            reward_max=reward_max,
-            tip_age_max=tip_age_max,
-            backup_age_max_hours=backup_age_max_hours,
-        )
-
-    if args.once:
-        state = run_cycle(state)
-        save_state(state_file, state)
-    else:
-        try:
-            while True:
-                state = run_cycle(state)
-                save_state(state_file, state)
-                time.sleep(poll_interval)
-        except KeyboardInterrupt:
-            print("\nShutting down...")
-
-
-if __name__ == "__main__":
-    main()
