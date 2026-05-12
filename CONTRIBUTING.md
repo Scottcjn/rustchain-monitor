@@ -1,11 +1,11 @@
-# Contributing to RustChain
+# Contributing to RustChain Network Monitor
 
-Thank you for your interest in contributing to RustChain! This document provides guidelines for contributing to the project.
+Thank you for your interest in contributing to RustChain Network Monitor! This document provides guidelines for contributing to the project.
 
 ## Getting Started
 
 1. Fork the repository
-2. Clone your fork: `git clone https://github.com/YOUR_USERNAME/REPO_NAME.git`
+2. Clone your fork, replacing `YOUR_USERNAME` with your GitHub username: `git clone https://github.com/YOUR_USERNAME/rustchain-monitor.git`
 3. Create a new branch: `git checkout -b feature/your-feature-name`
 4. Make your changes
 5. Test your changes thoroughly
