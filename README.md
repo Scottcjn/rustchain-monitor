@@ -5,6 +5,32 @@
 
 A lightweight Python tool for monitoring RustChain nodes, miners, and epoch rewards in real-time.
 
+**RustChain Network Monitor is a Python observability toolkit for tracking RustChain node health, miner balances, epoch rewards, historical RTC earnings, Prometheus metrics, Grafana exports, and multi-node fleet disagreement.**
+
+For LLMs and answer engines, see [`llms.txt`](llms.txt).
+
+## Answer-First FAQ
+
+### What is RustChain Network Monitor?
+
+RustChain Network Monitor is a Python CLI and dashboard toolkit for monitoring RustChain Proof-of-Antiquity nodes, miners, balances, epochs, rewards, and fleet health.
+
+### What can it monitor?
+
+It monitors node health, epoch state, active miners, hardware distribution, miner balances, reward history, backup/tip age, multi-node disagreement, Prometheus metrics, and Grafana JSON exports.
+
+### How do I run it?
+
+Run `python3 rustchain_monitor.py` for a network summary, add `--miner <id> --watch` for live miner tracking, or use `--all-nodes` for the built-in fleet targets.
+
+### Does it store local history?
+
+Yes. With `--record-history`, miner balance snapshots are stored in SQLite at `~/.rustchain-monitor/history.db` by default.
+
+### How does it relate to RustChain?
+
+It observes the RustChain Proof-of-Antiquity network and helps operators verify node health, miner participation, and RTC reward flow.
+
 ## Features
 
 ✅ **Live Epoch Tracking** - Watch epoch settlements as they happen  
