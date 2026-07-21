@@ -129,20 +129,29 @@ def get_table_info(db_path: str, table: str) -> Dict:
         cursor.execute(f"SELECT COUNT(*) FROM {table}")
         info["row_count"] = cursor.fetchone()[0]
         
-        # For balances, check for positive amounts
+        # For balances, check for positive amounts.
+        # The amount column can be named amount/balance/value depending on the
+        # schema version. SQLite validates every referenced column at prepare
+        # time, so a single query that names all of them (e.g. "amount > 0 OR
+        # balance > 0") raises "no such column" whenever the table has only one
+        # of them -- which is the normal case (canonical schema is
+        # balances(amount)). That error silently fell through to a row-count
+        # fallback, so a wiped/all-zero balances table was reported as having a
+        # positive balance and passed verification. Detect the real column via
+        # PRAGMA and query only that one.
         if table == "balances":
-            try:
-                cursor.execute(
-                    "SELECT COUNT(*) FROM balances WHERE amount > 0 OR balance > 0"
-                )
+            cursor.execute("PRAGMA table_info(balances)")
+            columns = {row[1] for row in cursor.fetchall()}
+            amount_col = next(
+                (c for c in ("amount", "balance", "value") if c in columns), None
+            )
+            if amount_col:
+                # amount_col comes from a fixed whitelist confirmed present in
+                # the table, so this f-string is not user-controlled.
+                cursor.execute(f"SELECT COUNT(*) FROM balances WHERE {amount_col} > 0")
                 info["has_positive"] = cursor.fetchone()[0] > 0
-            except sqlite3.Error:
-                # Column name might differ, try alternatives
-                try:
-                    cursor.execute("SELECT COUNT(*) FROM balances WHERE value > 0")
-                    info["has_positive"] = cursor.fetchone()[0] > 0
-                except sqlite3.Error:
-                    info["has_positive"] = info["row_count"] > 0
+            else:
+                info["has_positive"] = info["row_count"] > 0
         
         conn.close()
     except sqlite3.Error as e:
