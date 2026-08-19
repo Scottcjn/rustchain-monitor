@@ -78,6 +78,42 @@ def test_get_table_info_detects_positive_balances_with_amount_and_value_columns(
     assert value_info == {"exists": True, "row_count": 1, "has_positive": True}
 
 
+def test_get_table_info_detects_positive_balances_with_amount_i64_column(tmp_path):
+    # Regression: production rustchain_v2.db names the column amount_i64, not
+    # amount/balance/value. Before this fix the whitelist omitted it, so
+    # get_table_info fell through to the row-count fallback against the real
+    # schema -- reproducing the exact bug #57 was meant to close.
+    db = tmp_path / "amount_i64.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE balances (amount_i64 INTEGER)")
+    conn.execute("INSERT INTO balances (amount_i64) VALUES (0)")
+    conn.execute("INSERT INTO balances (amount_i64) VALUES (0)")
+    conn.commit()
+    conn.close()
+
+    info = verify_backup.get_table_info(str(db), "balances")
+
+    assert info == {"exists": True, "row_count": 2, "has_positive": False}
+
+
+def test_get_table_info_rejects_all_zero_balances(tmp_path):
+    # Regression: canonical schema is balances(amount). A backup whose balances
+    # are all zero (or negative) must report has_positive=False, otherwise
+    # verify_tables' check_positive requirement is defeated and a wiped backup
+    # passes verification.
+    zero_db = tmp_path / "zero.db"
+    conn = sqlite3.connect(zero_db)
+    conn.execute("CREATE TABLE balances (amount REAL)")
+    conn.execute("INSERT INTO balances (amount) VALUES (0)")
+    conn.execute("INSERT INTO balances (amount) VALUES (0)")
+    conn.commit()
+    conn.close()
+
+    info = verify_backup.get_table_info(str(zero_db), "balances")
+
+    assert info == {"exists": True, "row_count": 2, "has_positive": False}
+
+
 def test_verify_tables_passes_minimal_valid_backup_without_live_db(tmp_path):
     backup_db = tmp_path / "backup.db"
     _create_required_schema(backup_db)
