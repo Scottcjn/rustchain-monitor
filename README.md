@@ -43,7 +43,28 @@ It observes the RustChain Proof-of-Antiquity network and helps operators verify 
 ✅ **CSV Export + Comparisons** - Export snapshots and compare miners over time  
 ✅ **Prometheus Metrics Endpoint** - Expose live node and local history metrics on `/metrics`  
 ✅ **Grafana JSON Export** - Write Grafana-friendly snapshot JSON for file/JSON datasources  
-✅ **Multi-Node Fleet Export** - Scrape Node 1, Node 2, and Node 3 together with disagreement gauges  
+✅ **Multi-Node Fleet Export** - Scrape the live fleet together with disagreement gauges  
+✅ **Body-validated liveness** - A 200 is not a node; HTML/non-JSON bodies, missing keys, and stale epochs are reported DOWN/stale with the reason  
+
+## Fleet Reality (verified 2026-09-21)
+
+RustChain currently has **two live attestation nodes**, not three or four:
+
+| Node | URL | Status |
+|------|-----|--------|
+| Node 1 | `https://50.28.86.131` (also `https://rustchain.org`) | live, primary, does settlement |
+| Node 2 | `https://50.28.86.153` | live (`:8099` is only reachable from inside the VPS) |
+| Node 3 | `http://100.88.109.32:8099` | offline since ~May 2026 (Ryan's Proxmox); listed but `"enabled": false`, so it is neither probed nor counted |
+| Node 4 | `38.76.217.189` | **retired**. The host now serves an unrelated web app that answers `200` with HTML on every path. It is not in any target list; the monitor warns if a config still points at it |
+
+How the monitor decides a node is **online** (`rustchain_monitor.py`):
+
+1. `/health`, `/epoch`, `/api/miners` each answer `200` with a JSON content type, the body parses, and it is a JSON object. Anything else is `down` with the reason `non-JSON 200 (possible hijacked/parked host)`.
+2. `/health` carries `"ok": true` and a `version`; `/epoch` carries an epoch number.
+3. `tip_age_slots` is at most 144 (one epoch), otherwise `stale`.
+4. In fleet mode, a node whose epoch lags the highest online epoch by more than 1 is `stale`.
+
+Every request has a 10 s timeout, so a dead host costs seconds, not minutes.
 
 ## Quick Start
 
@@ -107,26 +128,45 @@ python3 rustchain_monitor.py --nodes-config nodes.example.json --export-grafana-
 
 ## Example Output
 
-### Network Summary Mode
+### Fleet Summary Mode (real output, 2026-09-21)
 
 ```bash
-$ python3 rustchain_monitor.py
+$ python3 rustchain_monitor.py --all-nodes
 
-╔═══════════════════════════════════════════════════════╗
-║  RustChain Network Monitor - 2026-03-02 08:15:00      ║
-╠═══════════════════════════════════════════════════════╣
-║  Network Status: ✅ Healthy                           ║
-║  Active Nodes: 3                                      ║
-║  Active Miners: 47                                    ║
-║  Current Epoch: 1847                                  ║
-║  Base Reward: 1.500000 RTC                            ║
-╚═══════════════════════════════════════════════════════╝
+Multi-Node RustChain Summary
+Nodes online: 2/2 probed (1 disabled, not probed)
+Epoch span:   292 -> 292
+Miner span:   14 -> 15
 
-Hardware Distribution:
-  PowerPC G4:    12 miners (25.5%)
-  PowerPC G5:    8 miners (17.0%)
-  Apple Silicon: 15 miners (31.9%)
-  Modern x86:    12 miners (25.5%)
+Node 1 (Primary)
+  URL:    https://50.28.86.131
+  Status: online
+  Epoch:  292
+  Miners: 14
+  Tip age: 0 slots
+
+Node 2 (Secondary)
+  URL:    https://50.28.86.153
+  Status: online
+  Epoch:  292
+  Miners: 15
+  Tip age: 0 slots
+
+Node 3 (External (Tailscale))
+  URL:    http://100.88.109.32:8099
+  Status: disabled (expected down, not probed)
+  Epoch:  n/a
+  Miners: n/a
+  Reason: not probed: Ryan's Proxmox node; offline since ~2026-05 (expected down). Re-enable when it returns.
+```
+
+A host that answers but is not a node (this is the retired Node 4 host):
+
+```bash
+$ python3 rustchain_monitor.py --node https://38.76.217.189
+
+❌ Node DOWN: https://38.76.217.189
+Reason: /health: non-JSON 200 (possible hijacked/parked host); content-type='text/html; charset=utf-8'
 ```
 
 ### Single Miner Watch Mode
@@ -150,19 +190,6 @@ $ python3 rustchain_monitor.py --miner vintage-g4-mac --watch
 [08:16:00] 🎉 NEW EPOCH! Earned: 0.382150 RTC
 [08:26:00] 🎉 NEW EPOCH! Earned: 0.375000 RTC
 [08:36:00] 🎉 NEW EPOCH! Earned: 0.391250 RTC
-```
-
-### Node Health Check
-
-```bash
-$ python3 rustchain_monitor.py --node https://rustchain.org/health
-
-Node: https://rustchain.org
-Status: ✅ Online
-Response Time: 127ms
-Last Block: 1847
-Peer Count: 8
-Sync Status: Fully synced
 ```
 
 ## About RustChain
@@ -336,8 +363,8 @@ $ python3 rustchain_monitor.py
 ║      RustChain Network Summary         ║
 ╠════════════════════════════════════════════╣
 ║  Node:    ✅ Healthy                      ║
-║  Epoch:   N/A                            ║
-║  Miners:  19 active                  ║
+║  Epoch:   292                            ║
+║  Miners:  14 active                  ║
 ╚════════════════════════════════════════════╝
 
 Hardware Distribution:
@@ -350,20 +377,11 @@ Hardware Distribution:
   AMD64 Family 23 Model 96 Stepping 1, AuthenticAMD : 1 miners
 ```
 
-### Node Health Check
+### Checking a node by hand
 
-```text
-$ rustchain-monitor --host https://50.28.86.131
-
-RustChain Monitor
-================
-Status:          OK
-Node health:     ✅ healthy
-Active miners:   9
-Attestation:     3 nodes
-Last update:     2026-03-05T12:34:56Z
-
-Tips:
-- If health is failing, try: curl -sk https://50.28.86.131/health
-- To see miners:          curl -sk https://50.28.86.131/api/miners
+```bash
+curl -sk -i https://50.28.86.131/health      # expect: 200, content-type: application/json, {"ok":true,"version":...}
+curl -sk https://50.28.86.131/api/miners     # expect: {"miners":[...]}
 ```
+
+Read the body, not just the code: a parked or reused host returns `200` with HTML for every path.

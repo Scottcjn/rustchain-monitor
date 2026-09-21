@@ -171,6 +171,10 @@
 </footer>
 
 <script>
+// Fleet as verified 2026-09-21: TWO live nodes. Keep in sync with
+// DEFAULT_MULTI_NODE_TARGETS in rustchain_monitor.py (a test checks this).
+// Node 4 (38.76.217.189) is retired: the host now serves an unrelated web app
+// that answers 200 HTML on every path. Do not add it back.
 const NODES = [
   {
     id: 'node1',
@@ -180,15 +184,18 @@ const NODES = [
     healthUrl: 'https://50.28.86.131/health',
     minersUrl: 'https://50.28.86.131/api/miners',
     epochUrl: 'https://50.28.86.131/epoch',
+    enabled: true,
   },
   {
     id: 'node2',
     name: 'Node 2',
     role: 'Secondary',
-    url: 'http://50.28.86.153:8099',
-    healthUrl: 'http://50.28.86.153:8099/health',
-    minersUrl: 'http://50.28.86.153:8099/api/miners',
-    epochUrl: 'http://50.28.86.153:8099/epoch',
+    // :8099 is not reachable from outside the VPS; nginx on 443 proxies to it.
+    url: 'https://50.28.86.153',
+    healthUrl: 'https://50.28.86.153/health',
+    minersUrl: 'https://50.28.86.153/api/miners',
+    epochUrl: 'https://50.28.86.153/epoch',
+    enabled: true,
   },
   {
     id: 'node3',
@@ -198,8 +205,38 @@ const NODES = [
     healthUrl: 'http://100.88.109.32:8099/health',
     minersUrl: 'http://100.88.109.32:8099/api/miners',
     epochUrl: 'http://100.88.109.32:8099/epoch',
+    enabled: false,
+    note: "Ryan's Proxmox node; offline since ~2026-05 (expected down). Re-enable when it returns.",
   },
 ];
+
+const ENABLED_NODES = NODES.filter(n => n.enabled !== false);
+const MAX_TIP_AGE_SLOTS = 144; // one epoch; beyond this the tip is stale
+
+// A 200 is not evidence of a node. The body must be JSON by header AND by
+// parse, and must be an object, or we say why it is not.
+function isJsonContentType(res) {
+  const ct = (res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+  return ct === 'application/json' || ct.endsWith('+json');
+}
+
+async function readNodeJson(settled, path) {
+  if (settled.status !== 'fulfilled') {
+    throw new Error(`${path}: ${settled.reason?.message || 'connection failed / timeout'}`);
+  }
+  const res = settled.value;
+  if (res.status !== 200) throw new Error(`${path}: HTTP ${res.status}`);
+  if (!isJsonContentType(res)) {
+    throw new Error(`${path}: non-JSON 200 (possible hijacked/parked host); content-type=${res.headers.get('content-type') || 'missing'}`);
+  }
+  let data;
+  try { data = JSON.parse(await res.text()); }
+  catch { throw new Error(`${path}: non-JSON 200 (possible hijacked/parked host); body is not valid JSON`); }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    throw new Error(`${path}: non-JSON 200 (possible hijacked/parked host); JSON payload is not an object`);
+  }
+  return data;
+}
 
 // Session history for uptime tracking
 const history = {};
@@ -242,31 +279,33 @@ async function fetchNodeData(node) {
     ]);
     clearTimeout(timer);
 
-    let health = null, miners = null, epoch = null;
+    // /health and /epoch are required to call a node online; /api/miners is informational.
+    const health = await readNodeJson(healthRes, '/health');
+    if (health.ok !== true) throw new Error(`/health: node reports ok=${JSON.stringify(health.ok)}`);
+    if (typeof health.version !== 'string' || !health.version) throw new Error("/health: missing 'version' (not a RustChain node payload)");
+    const epoch = await readNodeJson(epochRes, '/epoch');
+    const epochNumber = Number.isInteger(epoch.current_epoch) ? epoch.current_epoch
+                      : Number.isInteger(epoch.epoch) ? epoch.epoch : null;
+    if (epochNumber === null || epochNumber < 0) throw new Error(`/epoch: missing or invalid epoch number`);
 
-    if (healthRes.status === 'fulfilled' && healthRes.value.ok) {
-      health = await healthRes.value.json();
-    }
-    if (minersRes.status === 'fulfilled' && minersRes.value.ok) {
-      try { miners = await minersRes.value.json(); } catch {}
-    }
-    if (epochRes.status === 'fulfilled' && epochRes.value.ok) {
-      try { epoch = await epochRes.value.json(); } catch {}
-    }
+    let miners = null;
+    try { miners = await readNodeJson(minersRes, '/api/miners'); } catch { miners = null; }
+    // Live nodes serve {"miners": [...]}; older builds returned a bare list.
+    const minerList = Array.isArray(miners) ? miners : Array.isArray(miners?.miners) ? miners.miners : null;
 
-    if (!health || !health.ok) {
-      return { status: 'down', error: 'Health check failed or returned not-ok' };
-    }
+    const tipAge = health.tip_age_slots;
+    const stale = typeof tipAge === 'number' && tipAge > MAX_TIP_AGE_SLOTS;
 
     return {
-      status: 'up',
-      version: health.version || '—',
-      uptime: health.uptime,
-      db: health.db || '—',
+      status: stale ? 'stale' : 'up',
+      error: stale ? `stale tip: tip_age_slots=${tipAge} exceeds ${MAX_TIP_AGE_SLOTS}` : '',
+      version: health.version,
+      uptime: health.uptime_s ?? health.uptime,
+      db: health.db_rw === true ? 'rw' : (health.db || (health.db_rw === false ? 'read-only' : '—')),
       backupAge: health.backup_age_hours,
-      tipAge: health.tip_age_slots,
-      minerCount: Array.isArray(miners) ? miners.length : (miners?.count ?? '—'),
-      epoch: epoch?.epoch ?? '—',
+      tipAge,
+      minerCount: minerList ? minerList.length : (miners?.count ?? '—'),
+      epoch: epochNumber,
       raw: health,
     };
   } catch (err) {
@@ -275,16 +314,32 @@ async function fetchNodeData(node) {
   }
 }
 
+// Fleet cross-check: a node whose epoch lags the highest online epoch by more
+// than one is stale, even if its own /health looks fine.
+function assessEpochAgreement(results) {
+  const epochs = results.filter(r => r.status === 'up' && Number.isInteger(r.epoch)).map(r => r.epoch);
+  if (!epochs.length) return;
+  const fleetEpoch = Math.max(...epochs);
+  results.forEach(r => {
+    if (r.status === 'up' && Number.isInteger(r.epoch) && fleetEpoch - r.epoch > 1) {
+      r.status = 'stale';
+      r.error = `stale epoch ${r.epoch} (fleet max ${fleetEpoch}, tolerance 1)`;
+    }
+  });
+}
+
 function renderCard(node, data) {
   const isUp = data.status === 'up';
+  const isStale = data.status === 'stale';
+  const isDisabled = data.status === 'disabled';
   const isLoading = data.status === 'loading';
-  const cls = isLoading ? 'loading' : isUp ? 'up' : 'down';
-  const badge = isLoading ? '⏳ Checking...' : isUp ? '🟢 Online' : '🔴 Offline';
+  const cls = isLoading ? 'loading' : isUp ? 'up' : (isStale || isDisabled) ? 'loading' : 'down';
+  const label = isLoading ? 'Checking…' : isUp ? 'Online' : isStale ? 'Stale' : isDisabled ? 'Disabled (expected down)' : 'Offline';
   const dotCls = cls;
 
   const dbOk = data.db && (data.db === 'rw' || data.db.includes('rw'));
-  const backupOk = data.backupAge !== undefined && data.backupAge < 2;
-  const tipOk = data.tipAge !== undefined && data.tipAge < 100;
+  const backupOk = data.backupAge != null && data.backupAge < 2;
+  const tipOk = data.tipAge != null && data.tipAge < 100;
 
   return `
     <div class="node-card ${cls}" id="card-${node.id}">
@@ -295,10 +350,10 @@ function renderCard(node, data) {
         </div>
         <div class="status-badge ${cls}">
           <span class="dot ${dotCls}"></span>
-          ${isLoading ? 'Checking…' : isUp ? 'Online' : 'Offline'}
+          ${label}
         </div>
       </div>
-      ${isUp ? `
+      ${(isUp || isStale) ? `
       <div class="metrics">
         <div class="metric">
           <label>Version</label>
@@ -329,8 +384,9 @@ function renderCard(node, data) {
           <value class="neutral">${data.epoch}</value>
         </div>
       </div>
+      ${isStale ? `<div class="error-msg">⚠ ${data.error}</div>` : ''}
       ` : `
-      <div class="error-msg">⚠ ${data.error || 'Node unreachable'}</div>
+      <div class="error-msg">${isDisabled ? '⏸ ' : '⚠ '}${data.error || 'Node unreachable'}</div>
       `}
       <div class="node-url">${node.url}</div>
       <div class="last-check">Last check: ${new Date().toLocaleTimeString()}</div>
@@ -346,10 +402,17 @@ async function fetchAll() {
     grid.innerHTML = NODES.map(n => renderCard(n, { status: 'loading' })).join('');
   }
 
-  const results = await Promise.all(NODES.map(fetchNodeData));
+  // Disabled nodes are shown but never probed and never counted.
+  const results = await Promise.all(NODES.map(n =>
+    n.enabled === false
+      ? Promise.resolve({ status: 'disabled', error: `not probed: ${n.note || 'disabled in config'}` })
+      : fetchNodeData(n)
+  ));
+  assessEpochAgreement(results);
 
-  // Update history
+  // Update history (probed nodes only)
   results.forEach((r, i) => {
+    if (r.status === 'disabled') return;
     const h = history[NODES[i].id];
     h.checks++;
     if (r.status === 'up') h.up++;
@@ -364,15 +427,15 @@ async function fetchAll() {
   const versions = [...new Set(results.filter(r => r.version).map(r => r.version))];
 
   const onlineEl = document.getElementById('statOnline');
-  onlineEl.textContent = `${onlineCount}/${NODES.length}`;
-  onlineEl.className = 'stat-value ' + (onlineCount === NODES.length ? 'green' : onlineCount > 0 ? 'yellow' : 'red');
+  onlineEl.textContent = `${onlineCount}/${ENABLED_NODES.length}`;
+  onlineEl.className = 'stat-value ' + (onlineCount === ENABLED_NODES.length ? 'green' : onlineCount > 0 ? 'yellow' : 'red');
   document.getElementById('statMiners').textContent = totalMiners || '—';
   document.getElementById('statVersion').textContent = versions.join(', ') || '—';
   document.getElementById('statTime').textContent = new Date().toLocaleTimeString();
 
   // Update uptime bars
   const barsEl = document.getElementById('uptimeBars');
-  barsEl.innerHTML = NODES.map((n, i) => {
+  barsEl.innerHTML = ENABLED_NODES.map((n) => {
     const h = history[n.id];
     const pct = h.checks > 0 ? Math.round((h.up / h.checks) * 100) : 0;
     const color = uptimeClass(pct);
