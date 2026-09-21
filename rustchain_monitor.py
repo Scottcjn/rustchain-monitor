@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Dict, List, Optional
+from urllib.parse import urlparse
 
 import requests
 import urllib3
@@ -37,6 +38,25 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 DEFAULT_HISTORY_DB = Path.home() / ".rustchain-monitor" / "history.db"
 DEFAULT_NODE_URL = "https://50.28.86.131"
+
+# Liveness policy. A node is only "online" when its body proves it is a
+# RustChain node: JSON content type, a JSON object, the expected keys, and a
+# fresh chain tip. Status code alone is never enough -- a parked or reused host
+# (an SPA behind nginx, for example) answers 200 with HTML on every path.
+REQUEST_TIMEOUT_S = 10.0
+MAX_TIP_AGE_SLOTS = 144  # one epoch (144 slots x 600s); beyond this the tip is stale
+EPOCH_TOLERANCE = 1  # a node may lag the fleet's highest epoch by this much
+NON_JSON_200_REASON = "non-JSON 200 (possible hijacked/parked host)"
+
+# Hosts that used to be attestation nodes and no longer are. A config that still
+# points at one gets a warning, because the host may answer 200 to anything.
+RETIRED_NODE_HOSTS = {
+    "38.76.217.189": "Node 4 (createkr, CognetCloud HK) retired; host now serves an unrelated SPA",
+}
+
+# The real fleet as verified 2026-09-21 (read-only probes): TWO live nodes.
+# Node 3 is kept for when Ryan's box comes back, but disabled so it is not
+# probed and not counted against fleet health. Node 4 is gone (see above).
 DEFAULT_MULTI_NODE_TARGETS = [
     {
         "node_id": "node1",
@@ -48,15 +68,111 @@ DEFAULT_MULTI_NODE_TARGETS = [
         "node_id": "node2",
         "name": "Node 2",
         "role": "Secondary",
-        "url": "http://50.28.86.153:8099",
+        # :8099 is not reachable from outside the VPS; nginx on 443 proxies to it.
+        "url": "https://50.28.86.153",
     },
     {
         "node_id": "node3",
         "name": "Node 3",
         "role": "External (Tailscale)",
         "url": "http://100.88.109.32:8099",
+        "enabled": False,
+        "note": "Ryan's Proxmox node; offline since ~2026-05 (expected down). Re-enable when it returns.",
     },
 ]
+
+
+class NodeLivenessError(RuntimeError):
+    """The endpoint answered, but the body does not describe a live RustChain node."""
+
+
+def _is_json_content_type(content_type: str) -> bool:
+    media_type = str(content_type or "").split(";", 1)[0].strip().lower()
+    return media_type == "application/json" or media_type.endswith("+json")
+
+
+def parse_node_json(response, path: str) -> dict:
+    """Turn an HTTP response into a node JSON object, or raise NodeLivenessError saying why not.
+
+    A 200 is not evidence of a node. The body must be JSON (by header AND by
+    parse) and must be an object; anything else is reported as a possible
+    hijacked/parked host so the reason survives into the summary.
+    """
+    status = int(getattr(response, "status_code", 0) or 0)
+    if status != 200:
+        raise NodeLivenessError(f"{path}: HTTP {status}")
+
+    content_type = ""
+    headers = getattr(response, "headers", None) or {}
+    if hasattr(headers, "get"):
+        content_type = headers.get("Content-Type", "") or headers.get("content-type", "") or ""
+    if not _is_json_content_type(content_type):
+        raise NodeLivenessError(f"{path}: {NON_JSON_200_REASON}; content-type={content_type or 'missing'!r}")
+
+    try:
+        data = json.loads(response.text)
+    except (TypeError, ValueError):
+        raise NodeLivenessError(f"{path}: {NON_JSON_200_REASON}; body is not valid JSON")
+    if not isinstance(data, dict):
+        raise NodeLivenessError(f"{path}: {NON_JSON_200_REASON}; JSON payload is not an object")
+    return data
+
+
+def validate_health_payload(health: dict) -> dict:
+    """Require the keys a RustChain /health carries: "ok": true and a version string."""
+    if health.get("ok") is not True:
+        raise NodeLivenessError(f"/health: node reports ok={health.get('ok')!r}")
+    version = health.get("version")
+    if not isinstance(version, str) or not version.strip():
+        raise NodeLivenessError("/health: missing 'version' (not a RustChain node payload)")
+    return health
+
+
+def validate_epoch_payload(epoch: dict) -> int:
+    """Require a non-negative integer epoch under 'epoch' or 'current_epoch'."""
+    raw = epoch.get("current_epoch", epoch.get("epoch"))
+    value = _coerce_int(raw, None)
+    if value is None or isinstance(raw, bool) or value < 0:
+        raise NodeLivenessError(f"/epoch: missing or invalid epoch number ({raw!r})")
+    return value
+
+
+def extract_miner_list(payload) -> list:
+    """/api/miners is served as {"miners": [...]} on the live nodes; older builds returned a bare list."""
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        inner = payload.get("miners")
+        if isinstance(inner, list):
+            return inner
+    return []
+
+
+def assess_fleet_epoch_agreement(snapshots: list[dict], *, tolerance: int = EPOCH_TOLERANCE) -> list[dict]:
+    """Mark nodes whose epoch lags the fleet's highest epoch by more than `tolerance` as stale.
+
+    Only nodes that are currently online vote for the fleet epoch, so one stale
+    node cannot drag the reference down. Mutates and returns `snapshots`.
+    """
+    online_epochs = [
+        snapshot["summary"]["epoch_current"]
+        for snapshot in snapshots
+        if snapshot.get("summary", {}).get("liveness") == "online"
+        and snapshot["summary"].get("epoch_current") is not None
+    ]
+    if not online_epochs:
+        return snapshots
+    fleet_epoch = max(online_epochs)
+    for snapshot in snapshots:
+        summary = snapshot.get("summary", {})
+        epoch_current = summary.get("epoch_current")
+        if summary.get("liveness") != "online" or epoch_current is None:
+            continue
+        if fleet_epoch - epoch_current > tolerance:
+            summary["node_ok"] = False
+            summary["liveness"] = "stale"
+            snapshot["error"] = f"stale epoch {epoch_current} (fleet max {fleet_epoch}, tolerance {tolerance})"
+    return snapshots
 
 
 def _history_db_path(db_path: str | Path) -> Path:
@@ -77,13 +193,33 @@ def normalize_node_target(raw_target: dict, *, index: int = 0) -> dict:
     name = str(raw_target.get("name") or raw_target.get("node_name") or f"Node {index + 1}").strip()
     role = str(raw_target.get("role") or raw_target.get("node_role") or "").strip()
     node_id = str(raw_target.get("node_id") or _slugify_node_text(name, fallback=f"node-{index + 1}")).strip()
+    enabled = raw_target.get("enabled", True)
+    if isinstance(enabled, str):
+        enabled = enabled.strip().lower() not in {"0", "false", "no", "off"}
+    note = str(raw_target.get("note") or "").strip()
 
     return {
         "node_id": node_id,
         "name": name,
         "role": role,
         "url": url,
+        "enabled": bool(enabled),
+        "note": note,
     }
+
+
+def _target_host(url: str) -> str:
+    return urlparse(url).hostname or ""
+
+
+def retired_host_warnings(targets: list[dict]) -> list[str]:
+    """Return one warning per target that still points at a host known to have left the fleet."""
+    warnings = []
+    for target in targets:
+        reason = RETIRED_NODE_HOSTS.get(_target_host(target["url"]))
+        if reason:
+            warnings.append(f"{target['name']} ({target['url']}) points at a retired host: {reason}")
+    return warnings
 
 
 def default_multi_node_targets() -> list[dict]:
@@ -102,6 +238,8 @@ def load_node_targets(config_path: str | Path) -> list[dict]:
     targets = [normalize_node_target(row, index=index) for index, row in enumerate(rows)]
     if not targets:
         raise ValueError("node config must contain at least one node target")
+    for warning in retired_host_warnings(targets):
+        print(f"WARNING: {warning}", file=sys.stderr)
     return targets
 
 
@@ -896,9 +1034,20 @@ def export_multi_node_grafana_json(
     return len(export["series"])
 
 
-def build_failed_snapshot(target: dict, error: Exception | str) -> dict:
+def _describe_request_error(exc: Exception) -> str:
+    """Short, human-readable reason for a transport failure (the raw urllib3 text is a paragraph)."""
+    if isinstance(exc, requests.exceptions.Timeout):
+        return f"timeout after {REQUEST_TIMEOUT_S:g}s"
+    if isinstance(exc, requests.exceptions.SSLError):
+        return f"TLS error: {exc}"
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        return f"connection failed: {exc}"
+    return str(exc)
+
+
+def build_failed_snapshot(target: dict, error: Exception | str, *, liveness: str = "down") -> dict:
     generated_at_ts = time.time()
-    error_text = str(error)
+    error_text = _describe_request_error(error) if isinstance(error, Exception) else str(error)
     return {
         "generated_at": datetime.fromtimestamp(generated_at_ts, timezone.utc).isoformat().replace("+00:00", "Z"),
         "generated_at_ts": generated_at_ts,
@@ -912,7 +1061,8 @@ def build_failed_snapshot(target: dict, error: Exception | str) -> dict:
         "summary": {
             "node_ok": False,
             "scrape_ok": False,
-            "version": "unreachable",
+            "liveness": liveness,
+            "version": "unreachable" if liveness == "down" else liveness,
             "epoch_current": None,
             "active_miners": None,
             "uptime_seconds": None,
@@ -926,8 +1076,13 @@ def build_failed_snapshot(target: dict, error: Exception | str) -> dict:
 
 
 def collect_multi_node_snapshots(node_targets: list[dict], *, history_db_path: Optional[str | Path] = None) -> list[dict]:
+    """Probe every enabled target, then cross-check epochs so a lagging node is reported as stale."""
     snapshots = []
     for target in node_targets:
+        if not target.get("enabled", True):
+            note = target.get("note") or "disabled in config"
+            snapshots.append(build_failed_snapshot(target, f"not probed: {note}", liveness="disabled"))
+            continue
         monitor = RustChainMonitor(
             target["url"],
             use_color=False,
@@ -939,11 +1094,11 @@ def collect_multi_node_snapshots(node_targets: list[dict], *, history_db_path: O
             snapshot["node_name"] = target.get("name")
             snapshot["node_role"] = target.get("role")
             snapshot["summary"]["scrape_ok"] = True
-            snapshot["error"] = ""
+            snapshot.setdefault("error", "")
         except Exception as exc:
             snapshot = build_failed_snapshot(target, exc)
         snapshots.append(snapshot)
-    return snapshots
+    return assess_fleet_epoch_agreement(snapshots)
 
 
 def parse_listen_address(listen: str) -> tuple[str, int]:
@@ -997,12 +1152,19 @@ class RustChainMonitor:
         node_url: str = DEFAULT_NODE_URL,
         use_color: bool = True,
         history_db_path: Optional[str | Path] = None,
+        timeout: float = REQUEST_TIMEOUT_S,
     ):
         self.node_url = node_url.rstrip('/')
         self.session = requests.Session()
         self.session.verify = False  # For self-signed certs
+        self.timeout = timeout
         self.use_color = use_color and sys.stdout.isatty()
         self.history_db_path = _history_db_path(history_db_path or DEFAULT_HISTORY_DB)
+
+    def _get_json(self, path: str) -> dict:
+        """GET a node path with a timeout and refuse anything that is not a JSON object."""
+        response = self.session.get(f"{self.node_url}{path}", timeout=self.timeout)
+        return parse_node_json(response, path)
     
     def _colorize(self, text: str, color: str) -> str:
         """Apply color to text if colors are enabled"""
@@ -1031,46 +1193,57 @@ class RustChainMonitor:
         return self._colorize(text, Colors.BRIGHT_CYAN)
         
     def get_health(self) -> Dict:
-        """Check node health"""
-        response = self.session.get(f"{self.node_url}/health")
-        return response.json()
-    
+        """Check node health. Raises NodeLivenessError unless the body is a real /health payload."""
+        return validate_health_payload(self._get_json("/health"))
+
     def get_epoch(self) -> Dict:
-        """Get current epoch info"""
-        response = self.session.get(f"{self.node_url}/epoch")
-        return response.json()
-    
+        """Get current epoch info. Raises NodeLivenessError unless the body carries an epoch number."""
+        epoch = self._get_json("/epoch")
+        validate_epoch_payload(epoch)
+        return epoch
+
     def get_miners(self) -> List[Dict]:
-        """Get all active miners"""
-        response = self.session.get(f"{self.node_url}/api/miners")
-        return response.json()
-    
+        """Get all active miners (the live nodes wrap the list as {"miners": [...]})."""
+        return extract_miner_list(self._get_json("/api/miners"))
+
     def get_miner_balance(self, miner_id: str) -> float:
         """Get specific miner's RTC balance"""
-        response = self.session.get(f"{self.node_url}/wallet/balance?miner_id={miner_id}")
-        return response.json().get("balance_rtc", 0.0)
+        return _coerce_float(self._get_json(f"/wallet/balance?miner_id={miner_id}").get("balance_rtc"), 0.0)
 
     def collect_network_snapshot(self) -> dict:
-        """Collect a single network snapshot for export surfaces."""
+        """Collect a single network snapshot for export surfaces.
+
+        Transport failures and non-node bodies raise (the caller records the
+        reason). A node that answers correctly but whose chain tip is older
+        than MAX_TIP_AGE_SLOTS is returned with liveness "stale" and node_ok
+        False, since it is reachable but not keeping up.
+        """
         health = self.get_health()
         epoch = self.get_epoch()
         miners = self.get_miners()
         generated_at_ts = time.time()
 
         hardware_distribution = {}
-        for miner in miners if isinstance(miners, list) else []:
+        for miner in miners:
             arch = str(miner.get("device_arch") or "unknown").strip() or "unknown"
             hardware_distribution[arch] = hardware_distribution.get(arch, 0) + 1
 
-        epoch_current = epoch.get("current_epoch", epoch.get("epoch"))
+        tip_age_slots = _coerce_float(health.get("tip_age_slots"), None)
+        error = ""
+        liveness = "online"
+        if tip_age_slots is not None and tip_age_slots > MAX_TIP_AGE_SLOTS:
+            liveness = "stale"
+            error = f"stale tip: tip_age_slots={tip_age_slots:g} exceeds {MAX_TIP_AGE_SLOTS}"
+
         summary = {
-            "node_ok": bool(health.get("ok")),
+            "node_ok": liveness == "online",
+            "liveness": liveness,
             "version": health.get("version", "unknown") or "unknown",
-            "epoch_current": _coerce_int(epoch_current, None),
-            "active_miners": len(miners) if isinstance(miners, list) else _coerce_int((miners or {}).get("count"), 0),
+            "epoch_current": validate_epoch_payload(epoch),
+            "active_miners": len(miners),
             "uptime_seconds": _coerce_float(health.get("uptime_s", health.get("uptime")), None),
             "backup_age_hours": _coerce_float(health.get("backup_age_hours"), None),
-            "tip_age_slots": _coerce_float(health.get("tip_age_slots"), None),
+            "tip_age_slots": tip_age_slots,
             "db_rw": _health_db_rw(health),
         }
 
@@ -1083,6 +1256,7 @@ class RustChainMonitor:
             "miners": miners,
             "summary": summary,
             "hardware_distribution": hardware_distribution,
+            "error": error,
         }
     
     def calculate_expected_reward(self, device_arch: str) -> float:
@@ -1266,32 +1440,46 @@ class RustChainMonitor:
         finally:
             server.server_close()
 
+    def _liveness_label(self, liveness: str) -> str:
+        if liveness == "online":
+            return self._status("online")
+        if liveness == "stale":
+            return self._warning("stale")
+        if liveness == "disabled":
+            return self._warning("disabled (expected down, not probed)")
+        return self._error("down")
+
     def multi_node_summary(self, node_targets: list[dict]) -> None:
         snapshots = self.collect_multi_node_snapshots(node_targets)
-        up_count = sum(1 for snapshot in snapshots if snapshot.get("summary", {}).get("scrape_ok"))
-        epochs = [snapshot.get("summary", {}).get("epoch_current") for snapshot in snapshots if snapshot.get("summary", {}).get("epoch_current") is not None]
-        miner_counts = [snapshot.get("summary", {}).get("active_miners") for snapshot in snapshots if snapshot.get("summary", {}).get("active_miners") is not None]
+        summaries = [snapshot.get("summary", {}) for snapshot in snapshots]
+        probed = [summary for summary in summaries if summary.get("liveness") != "disabled"]
+        online_count = sum(1 for summary in probed if summary.get("liveness") == "online")
+        disabled_count = len(summaries) - len(probed)
+        epochs = [summary.get("epoch_current") for summary in summaries if summary.get("epoch_current") is not None]
+        miner_counts = [summary.get("active_miners") for summary in summaries if summary.get("active_miners") is not None]
 
         print(f"{self._accent('Multi-Node RustChain Summary')}")
-        print(f"Nodes up:   {up_count}/{len(snapshots)}")
+        disabled_note = f" ({disabled_count} disabled, not probed)" if disabled_count else ""
+        print(f"Nodes online: {online_count}/{len(probed)} probed{disabled_note}")
         if epochs:
-            print(f"Epoch span: {min(epochs)} -> {max(epochs)}")
+            print(f"Epoch span:   {min(epochs)} -> {max(epochs)}")
         if miner_counts:
-            print(f"Miner span: {min(miner_counts)} -> {max(miner_counts)}")
+            print(f"Miner span:   {min(miner_counts)} -> {max(miner_counts)}")
         print("")
         for snapshot in snapshots:
             summary = snapshot.get("summary", {})
-            status = self._status("up") if summary.get("scrape_ok") else self._error("down")
-            epoch_value = summary.get("epoch_current", "n/a")
-            miner_value = summary.get("active_miners", "n/a")
+            epoch_value = summary.get("epoch_current")
+            miner_value = summary.get("active_miners")
             error_text = snapshot.get("error", "")
             print(f"{snapshot.get('node_name', snapshot.get('node_id', snapshot.get('node_url')))} ({snapshot.get('node_role', '')})")
             print(f"  URL:    {snapshot.get('node_url')}")
-            print(f"  Status: {status}")
-            print(f"  Epoch:  {epoch_value}")
-            print(f"  Miners: {miner_value}")
+            print(f"  Status: {self._liveness_label(summary.get('liveness', 'down'))}")
+            print(f"  Epoch:  {'n/a' if epoch_value is None else epoch_value}")
+            print(f"  Miners: {'n/a' if miner_value is None else miner_value}")
+            if summary.get("tip_age_slots") is not None:
+                print(f"  Tip age: {summary['tip_age_slots']:g} slots")
             if error_text:
-                print(f"  Error:  {error_text}")
+                print(f"  Reason: {error_text}")
             print("")
     
     def watch_miner(self, miner_id: str, interval: int = 60, record_history_enabled: bool = False):
@@ -1361,12 +1549,18 @@ class RustChainMonitor:
                 print(f"\n{self._error(f'❌ Error: {e}')}")
                 time.sleep(interval)
     
-    def network_summary(self):
-        """Display network summary"""
-        health = self.get_health()
-        epoch = self.get_epoch()
-        miners = self.get_miners()
-        
+    def network_summary(self) -> bool:
+        """Display network summary. Returns False (after printing the reason) when the node is not live."""
+        try:
+            health = self.get_health()
+            epoch = self.get_epoch()
+            miners = self.get_miners()
+        except (NodeLivenessError, requests.RequestException) as exc:
+            reason = _describe_request_error(exc) if isinstance(exc, requests.RequestException) else str(exc)
+            print(f"{self._error('❌ Node DOWN')}: {self.node_url}")
+            print(f"Reason: {reason}")
+            return False
+
         is_healthy = health.get('ok', False)
         node_status = self._status("✅ Healthy") if is_healthy else self._error("❌ Down")
         
@@ -1395,6 +1589,7 @@ class RustChainMonitor:
             else:
                 arch_str = self._colorize(arch, Colors.WHITE)
             print(f"  {arch_str:15} : {self._status(str(count))} miners")
+        return True
 
 def main():
     parser = argparse.ArgumentParser(description="RustChain Network Monitor")
@@ -1469,7 +1664,8 @@ def main():
     elif node_targets:
         monitor.multi_node_summary(node_targets)
     else:
-        monitor.network_summary()
+        if not monitor.network_summary():
+            sys.exit(1)
 
 if __name__ == "__main__":
     main()

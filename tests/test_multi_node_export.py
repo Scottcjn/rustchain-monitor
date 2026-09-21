@@ -37,13 +37,18 @@ def _sample_snapshot(node_id, node_name, node_role, node_url, *, epoch, miners, 
     }
 
 
-def test_default_multi_node_targets_use_live_endpoints():
+def test_default_multi_node_targets_reflect_the_real_fleet():
+    """Two live nodes (verified 2026-09-21). Node 3 stays listed but disabled; Node 4 is retired and absent."""
     targets = rustchain_monitor.default_multi_node_targets()
 
     assert [target["node_id"] for target in targets] == ["node1", "node2", "node3"]
     assert targets[0]["url"] == "https://50.28.86.131"
-    assert targets[1]["url"] == "http://50.28.86.153:8099"
+    # Node 2's :8099 is not reachable from outside the VPS; nginx on 443 proxies to it.
+    assert targets[1]["url"] == "https://50.28.86.153"
     assert targets[2]["url"] == "http://100.88.109.32:8099"
+    assert [target["enabled"] for target in targets] == [True, True, False]
+    assert targets[2]["note"]
+    assert not any("38.76.217.189" in target["url"] for target in targets)
 
 
 def test_build_multi_node_export_metrics_includes_aggregate_and_history_labels():

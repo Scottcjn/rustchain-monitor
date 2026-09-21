@@ -1,4 +1,5 @@
 {
+  "_comment": "Fleet as verified 2026-09-21: two live attestation nodes. Node 3 is kept but disabled (expected down). Node 4 (38.76.217.189) is retired; its host now serves an unrelated web app that answers 200 HTML on every path, so it must not be listed.",
   "nodes": [
     {
       "node_id": "node1",
@@ -10,13 +11,15 @@
       "node_id": "node2",
       "name": "Node 2",
       "role": "Secondary",
-      "url": "http://50.28.86.153:8099"
+      "url": "https://50.28.86.153"
     },
     {
       "node_id": "node3",
       "name": "Node 3",
       "role": "External (Tailscale)",
-      "url": "http://100.88.109.32:8099"
+      "url": "http://100.88.109.32:8099",
+      "enabled": false,
+      "note": "Ryan's Proxmox node; offline since ~2026-05 (expected down). Re-enable when it returns."
     }
   ]
 }
