@@ -19,9 +19,11 @@ Usage:
 import argparse
 import csv
 import json
+import math
 import sys
 import sqlite3
 import time
+from contextlib import closing
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -425,6 +427,13 @@ def _period_gain(conn: sqlite3.Connection, miner_id: str, now_ts: float, days: i
         """,
         (miner_id,),
     ).fetchone()
+    return _period_gain_from_latest(conn, miner_id, cutoff_ts, latest)
+
+
+def _period_gain_from_latest(
+    conn: sqlite3.Connection, miner_id: str, cutoff_ts: float, latest
+) -> float:
+    """Calculate the window gain from an already selected latest row."""
     if not latest or float(latest["observed_at"]) < cutoff_ts:
         return 0.0
 
@@ -522,33 +531,45 @@ def compare_miner_history(
     now_ts: Optional[float] = None,
     days: int = 7,
 ) -> list[dict]:
-    """Compare miners by recent gain and current balance."""
+    """Compare miners by gain over the requested number of days and current balance."""
     now_ts = time.time() if now_ts is None else now_ts
     rows = []
-    for miner_id in miner_ids:
-        summary = get_history_summary(db_path, miner_id=miner_id, now_ts=now_ts, days=max(days, 30))
-        recent_gain = summary["daily_gain_7d"] if days == 7 else _period_value(summary, days)
-        rows.append(
-            {
-                "miner_id": miner_id,
-                "snapshots": summary["snapshots"],
-                "latest_balance": summary["latest_balance"],
-                "recent_gain": recent_gain,
-                "daily_average": (recent_gain / days) if days else recent_gain,
-                "latest_epoch": summary["latest_epoch"],
-                "last_seen": summary["last_seen"],
-            }
-        )
+    if not miner_ids:
+        return rows
+
+    # A comparison needs counts and the latest balance, not each miner's full
+    # retained history, daily chart, or the other summary-window calculations.
+    with closing(_history_connection(db_path)) as conn:
+        # Keep metadata and gains coherent while history writers add snapshots.
+        conn.execute("BEGIN")
+        for miner_id in miner_ids:
+            latest = conn.execute(
+                """
+                SELECT observed_at, balance_rtc, epoch,
+                    (SELECT COUNT(*) FROM miner_history WHERE miner_id = ?) AS snapshots
+                FROM miner_history
+                WHERE miner_id = ?
+                ORDER BY observed_at DESC, id DESC
+                LIMIT 1
+                """,
+                (miner_id, miner_id),
+            ).fetchone()
+            recent_gain = _period_gain_from_latest(
+                conn, miner_id, now_ts - (days * 86400), latest
+            )
+            rows.append(
+                {
+                    "miner_id": miner_id,
+                    "snapshots": latest["snapshots"] if latest else 0,
+                    "latest_balance": float(latest["balance_rtc"]) if latest else 0.0,
+                    "recent_gain": recent_gain,
+                    "daily_average": (recent_gain / days) if days else recent_gain,
+                    "latest_epoch": latest["epoch"] if latest else None,
+                    "last_seen": float(latest["observed_at"]) if latest else None,
+                }
+            )
     rows.sort(key=lambda row: (-row["recent_gain"], -row["latest_balance"], row["miner_id"]))
     return rows
-
-
-def _period_value(summary: dict, days: int) -> float:
-    if days <= 1:
-        return summary["daily_gain_1d"]
-    if days <= 7:
-        return summary["daily_gain_7d"]
-    return summary["daily_gain_30d"]
 
 
 def export_history_csv(
@@ -1207,8 +1228,19 @@ class RustChainMonitor:
         return extract_miner_list(self._get_json("/api/miners"))
 
     def get_miner_balance(self, miner_id: str) -> float:
-        """Get specific miner's RTC balance"""
-        return _coerce_float(self._get_json(f"/wallet/balance?miner_id={miner_id}").get("balance_rtc"), 0.0)
+        """Get a valid RTC balance without turning unavailable data into zero."""
+        payload = self._get_json(f"/wallet/balance?miner_id={miner_id}")
+        raw_balance = payload.get("balance_rtc")
+        error = "/wallet/balance: missing or invalid balance_rtc"
+        if isinstance(raw_balance, bool):
+            raise NodeLivenessError(error)
+        try:
+            balance = float(raw_balance)
+        except (TypeError, ValueError, OverflowError):
+            raise NodeLivenessError(error) from None
+        if not math.isfinite(balance):
+            raise NodeLivenessError(error)
+        return balance
 
     def collect_network_snapshot(self) -> dict:
         """Collect a single network snapshot for export surfaces.

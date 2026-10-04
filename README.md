@@ -217,6 +217,11 @@ The monitor can now persist miner balance snapshots into a local SQLite database
 - compare multiple miners with `--compare miner-a,miner-b`
 - export stored rows with `--export-csv rewards.csv`
 
+Snapshots require a successful balance response with a finite numeric
+`balance_rtc`; numeric strings and genuine zero balances remain supported.
+Missing, malformed, boolean, or non-finite balances raise `NodeLivenessError`
+before a history write, so recovery is compared with the last valid observation.
+
 Example:
 
 ```bash

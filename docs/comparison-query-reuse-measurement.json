@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "description": "Measured reuse of the already selected latest row in miner comparisons.",
+  "measured_at_utc": "2026-10-04T13:12:38Z",
+  "source": {
+    "repository": "woahwhattheheck/rustchain-monitor",
+    "path": "rustchain_monitor.py",
+    "baseline_commit": "983e4331970e0d9cf34c962db5c8a19a2d0d7e89",
+    "baseline_blob": "dd3eacf1b98a5a128b6a4955f068d85880e4366f",
+    "measured_validation_commit": "075366f9883be2e7614b79f3e39f03e28cc8dedd",
+    "measured_candidate_blob": "e1d4a4204046ad39dc3d38408e87e76b6c78a210",
+    "change": "Comparison passes its latest row to the existing window calculation through a shared helper. The summary wrapper retains its latest-row query; the read transaction, cutoff arithmetic, baseline fallback and ranking are preserved."
+  },
+  "benchmark": {
+    "path": "benchmarks/monitor59_query_reuse.py",
+    "blob": "d592b61246f7e8ad263af899b13bcd8fee6da803",
+    "immutable_url": "https://github.com/woahwhattheheck/rustchain-monitor/blob/075366f9883be2e7614b79f3e39f03e28cc8dedd/benchmarks/monitor59_query_reuse.py",
+    "fixture": {
+      "comparison_days": 7,
+      "interval_seconds": 3600,
+      "miners": 32,
+      "now_ts": 2100000000,
+      "snapshots_per_miner": 720,
+      "sqlite_bytes": 3465216,
+      "synthetic": true,
+      "total_snapshots": 23040
+    },
+    "warmup_calls_per_version": 3,
+    "calls_per_timed_batch": 100,
+    "method": "Three alternating baseline/candidate pairs. Each value is elapsed batch time divided by 100 complete comparison calls. Full calls include schema initialization and connection cost; database construction is excluded. SQL tracing runs separately and is removed before timing."
+  },
+  "environment": {
+    "machine": "x86_64",
+    "platform": "Linux",
+    "python": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+    "sqlite": "3.45.1",
+    "os": "Ubuntu 24.04.5",
+    "pytest": "9.1.1",
+    "requests": "2.34.2",
+    "urllib3": "2.8.0"
+  },
+  "validation": {
+    "test_path": "tests/test_comparison_periods.py",
+    "unchanged_test_blob": "59db24e773532eee8c2cb4d94a55c4a2d5482970",
+    "passed": 10,
+    "failed": 0,
+    "skipped": 0,
+    "elapsed_seconds": 0.36,
+    "full_result_equal": true,
+    "compared_output_rows": 32,
+    "compared_fields": [
+      "daily_average",
+      "last_seen",
+      "latest_balance",
+      "latest_epoch",
+      "miner_id",
+      "recent_gain",
+      "snapshots"
+    ],
+    "full_suite_run": false
+  },
+  "results": {
+    "selects_per_comparison": {
+      "baseline": 96,
+      "candidate": 64
+    },
+    "pairs": [
+      {
+        "candidate_reduction_percent": 19.624910620291363,
+        "milliseconds_per_full_call": {
+          "baseline": 2.80225796,
+          "candidate": 2.25231734
+        },
+        "order": [
+          "baseline",
+          "candidate"
+        ],
+        "pair": 1
+      },
+      {
+        "candidate_reduction_percent": 1.5794582082786761,
+        "milliseconds_per_full_call": {
+          "baseline": 2.33321653,
+          "candidate": 2.29636435
+        },
+        "order": [
+          "candidate",
+          "baseline"
+        ],
+        "pair": 2
+      },
+      {
+        "candidate_reduction_percent": 8.028484588591287,
+        "milliseconds_per_full_call": {
+          "baseline": 2.36416123,
+          "candidate": 2.17435491
+        },
+        "order": [
+          "baseline",
+          "candidate"
+        ],
+        "pair": 3
+      }
+    ],
+    "median_batch_mean_ms_per_full_call": {
+      "baseline": 2.36416123,
+      "candidate": 2.25231734
+    },
+    "median_reduction_percent": 4.730806367212115,
+    "interpretation": "A modest 4.73% reduction in the median of three batch means, with all three pairs improving. The exact SELECT reduction is 96 to 64. Pairwise timing reductions vary from 1.58% to 19.62%; these measurements do not establish production or tail latency."
+  },
+  "replay": {
+    "working_tree": "Use a dedicated checkout of measured_validation_commit with its parent Git object available; clone depth 2 is sufficient. The benchmark script is retained at that immutable commit rather than added to the original contribution.",
+    "required_baseline_git_object": "983e4331970e0d9cf34c962db5c8a19a2d0d7e89:rustchain_monitor.py",
+    "dependencies": "Python 3.12 with stdlib sqlite3, Git, declared project dependencies requests>=2.34.2 and urllib3>=2.7.0, and pytest.",
+    "commands": [
+      "python -m pytest tests/test_comparison_periods.py -q",
+      "python benchmarks/monitor59_query_reuse.py"
+    ],
+    "sequencing": "Run sequentially and stop if the existing tests fail.",
+    "output_markers": [
+      "MONITOR59_QUERY_REUSE_EVIDENCE_BEGIN",
+      "MONITOR59_QUERY_REUSE_EVIDENCE_END"
+    ]
+  },
+  "limitations": [
+    "One bounded, generated SQLite history; no captured live balances.",
+    "Three warmed alternating pairs of batch means, not a tail-latency distribution or a confidence interval.",
+    "No memory, cold-disk, live-node, or fleet-wide throughput measurement.",
+    "The benchmark and validation workflow remain on the immutable validation commit; this publication contains only the production source and this evidence."
+  ]
+}

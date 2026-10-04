@@ -1,6 +1,10 @@
 import csv
+import json
 import sys
 from pathlib import Path
+
+import pytest
+import requests
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -8,6 +12,90 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import rustchain_monitor
+
+
+@pytest.mark.parametrize(
+    "status_code,balance_payload,error_match",
+    [
+        (404, {"error": "balance unavailable"}, "HTTP 404"),
+        (500, {"error": "balance unavailable"}, "HTTP 500"),
+        (200, {}, "balance_rtc"),
+        (200, {"error": "balance unavailable"}, "balance_rtc"),
+        (200, {"balance_rtc": None}, "balance_rtc"),
+        (200, {"balance_rtc": ""}, "balance_rtc"),
+        (200, {"balance_rtc": "unavailable"}, "balance_rtc"),
+        (200, {"balance_rtc": False}, "balance_rtc"),
+        (200, {"balance_rtc": True}, "balance_rtc"),
+        (200, {"balance_rtc": []}, "balance_rtc"),
+        (200, {"balance_rtc": {}}, "balance_rtc"),
+        (200, {"balance_rtc": float("nan")}, "balance_rtc"),
+        (200, {"balance_rtc": float("inf")}, "balance_rtc"),
+        (200, {"balance_rtc": float("-inf")}, "balance_rtc"),
+        (200, {"balance_rtc": "NaN"}, "balance_rtc"),
+        (200, {"balance_rtc": "1e309"}, "balance_rtc"),
+        (200, {"balance_rtc": 10 ** 400}, "balance_rtc"),
+    ],
+)
+def test_invalid_balance_does_not_record_false_history(
+    tmp_path, monkeypatch, status_code, balance_payload, error_match
+):
+    db_path = tmp_path / "history.db"
+    monitor = rustchain_monitor.RustChainMonitor(history_db_path=db_path)
+    balances = iter([
+        (200, {"balance_rtc": 12.5}),
+        (status_code, balance_payload),
+        (200, {"balance_rtc": 14.5}),
+        (200, {"balance_rtc": 0.0}),
+    ])
+
+    def get_response(url, **kwargs):
+        response = requests.Response()
+        response.url = url
+        response.status_code = 200
+        response.headers["Content-Type"] = "application/json"
+        if "/wallet/balance?" in url:
+            response.status_code, payload = next(balances)
+        elif url.endswith("/epoch"):
+            payload = {"epoch": 100}
+        else:
+            payload = {"miners": []}
+        response._content = json.dumps(payload).encode("utf-8")
+        return response
+
+    monkeypatch.setattr(monitor.session, "get", get_response)
+
+    def record_current_balance():
+        snapshot = monitor.get_miner_snapshot("miner-a")
+        monitor.record_history("miner-a", snapshot)
+
+    record_current_balance()
+    with pytest.raises(rustchain_monitor.NodeLivenessError, match=error_match):
+        record_current_balance()
+    record_current_balance()
+    record_current_balance()
+
+    with rustchain_monitor._history_connection(db_path) as conn:
+        rows = conn.execute(
+            "SELECT balance_rtc, delta_rtc FROM miner_history ORDER BY id"
+        ).fetchall()
+
+    assert [tuple(row) for row in rows] == [(12.5, 0.0), (14.5, 2.0), (0.0, -14.5)]
+
+
+@pytest.mark.parametrize(
+    "raw_balance,expected",
+    [(0, 0.0), (0.0, 0.0), (12.5, 12.5), (-1.5, -1.5),
+     ("0", 0.0), ("12.5", 12.5), (" -1.5 ", -1.5), ("1e2", 100.0)],
+)
+def test_balance_preserves_finite_numeric_values(monkeypatch, raw_balance, expected):
+    monitor = rustchain_monitor.RustChainMonitor()
+    response = requests.Response()
+    response.status_code = 200
+    response.headers["Content-Type"] = "application/json"
+    response._content = json.dumps({"balance_rtc": raw_balance}).encode("utf-8")
+    monkeypatch.setattr(monitor.session, "get", lambda *args, **kwargs: response)
+
+    assert monitor.get_miner_balance("miner-a") == expected
 
 
 def test_record_history_snapshot_skips_duplicate_latest_point(tmp_path):
