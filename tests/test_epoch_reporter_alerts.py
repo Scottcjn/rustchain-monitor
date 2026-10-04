@@ -140,3 +140,66 @@ def test_run_once_posts_epoch_summary_and_alerts(monkeypatch):
     assert len(sent_messages) == 1
     assert "Epoch 123 settled" in sent_messages[0]
     assert len(moltbook_posts) == 1
+
+
+def test_fetch_miners_unwraps_live_envelope_and_rejects_non_lists(monkeypatch):
+    live = {"miners": [{"miner": "pi4"}], "pagination": {"count": 1}}
+    monkeypatch.setattr(epoch_reporter, "_fetch_json", lambda *args, **kwargs: live)
+    assert epoch_reporter.fetch_miners("https://node.example") == [{"miner": "pi4"}]
+
+    legacy = [{"miner": "legacy"}]
+    monkeypatch.setattr(epoch_reporter, "_fetch_json", lambda *args, **kwargs: legacy)
+    assert epoch_reporter.fetch_miners("https://node.example") == legacy
+
+    for junk in (None, {"error": "boom"}, "not-json-object", 3):
+        monkeypatch.setattr(epoch_reporter, "_fetch_json", lambda *args, _junk=junk, **kwargs: _junk)
+        assert epoch_reporter.fetch_miners("https://node.example") == []
+
+
+def test_run_once_accepts_live_miner_envelope(monkeypatch):
+    def fake_fetch(node_url, path, label):
+        return {
+            "/health": {"ok": True, "db_rw": True, "tip_age_slots": 0, "backup_age_hours": 1.0, "version": "2.2.1-rip200"},
+            "/epoch": {"epoch": 305, "epoch_pot": 1.5, "enrolled_miners": 14},
+            "/api/miners": {"miners": [{"miner": "pi4", "device_arch": "aarch64"}], "pagination": {"count": 1}},
+        }[path]
+
+    monkeypatch.setattr(epoch_reporter, "_fetch_json", fake_fetch)
+    sent_messages = []
+    monkeypatch.setattr(
+        epoch_reporter,
+        "notify_channels",
+        lambda message, **kwargs: sent_messages.append(message) or True,
+    )
+
+    state = epoch_reporter.run_once("https://node.example", epoch_reporter.default_state())
+
+    assert state["last_epoch"] == 305
+    assert "pi4" in state["tracked_miners"]
+    assert len(sent_messages) == 1
+    assert "Currently active miners: 1" in sent_messages[0]
+
+
+def test_format_epoch_message_does_not_multiply_aggregate_pot():
+    rendered = epoch_reporter.format_epoch_message(
+        {"epoch": 7, "epoch_pot": 1.5, "enrolled_miners": 3},
+        [],
+        "https://example.invalid",
+    )
+
+    assert "Epoch pot (aggregate): 1.5 RTC" in rendered
+    assert "Per-miner reward" not in rendered
+    assert "Estimated RTC distributed: 1.5" in rendered
+    assert "4.5" not in rendered
+
+
+def test_format_epoch_message_scales_only_per_miner_reward():
+    rendered = epoch_reporter.format_epoch_message(
+        {"epoch": 7, "epoch_pot": 1.5, "reward": 0.5, "enrolled_miners": 3},
+        [],
+        "https://example.invalid",
+    )
+
+    assert "Epoch pot (aggregate): 1.5 RTC" in rendered
+    assert "Per-miner reward: 0.5 RTC" in rendered
+    assert "Estimated RTC distributed: 1.5" in rendered
