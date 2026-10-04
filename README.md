@@ -295,6 +295,13 @@ python3 epoch_reporter.py --config epoch_reporter.example.json
 
 See [epoch_reporter.example.json](epoch_reporter.example.json) for the supported config keys.
 
+The reporter polls `https://rustchain.org` by default (override with `--node`,
+`API_NODE`, or the `node` config key) and **verifies the node's TLS certificate**,
+because the epoch/reward numbers it posts come from that fetch. To poll a node with a
+self-signed certificate, point `REQUESTS_CA_BUNDLE` at that node's CA. As a last
+resort, `API_NODE_INSECURE_TLS=1` disables verification (off by default; the reporter
+prints a warning at startup when it is set).
+
 ## Contributing
 
 Found a bug? Want to add features? PRs welcome!

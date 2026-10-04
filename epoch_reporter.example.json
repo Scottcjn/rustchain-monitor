@@ -1,5 +1,5 @@
 {
-  "node": "https://50.28.86.131",
+  "node": "https://rustchain.org",
   "poll_interval": 60,
   "state_file": ".epoch_state.json",
   "discord_webhook": "https://discord.com/api/webhooks/REPLACE_ME",
