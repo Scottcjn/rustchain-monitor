@@ -1207,8 +1207,20 @@ class RustChainMonitor:
         return extract_miner_list(self._get_json("/api/miners"))
 
     def get_miner_balance(self, miner_id: str) -> float:
-        """Get specific miner's RTC balance"""
-        return _coerce_float(self._get_json(f"/wallet/balance?miner_id={miner_id}").get("balance_rtc"), 0.0)
+        """Get specific miner's RTC balance.
+
+        The live node returns the canonical ``amount_rtc`` (with ``amount_i64``)
+        and does **not** include ``balance_rtc``, so reading only ``balance_rtc``
+        silently turned a successful 200 with a nonzero balance into ``0.0``.
+        Decode the canonical field first and fall back to the legacy alias for
+        older nodes; a genuinely missing/absent balance still yields ``0.0``.
+        """
+        payload = self._get_json(f"/wallet/balance?miner_id={miner_id}")
+        for key in ("amount_rtc", "balance_rtc"):
+            value = _coerce_float(payload.get(key), None)
+            if value is not None:
+                return value
+        return 0.0
 
     def collect_network_snapshot(self) -> dict:
         """Collect a single network snapshot for export surfaces.
