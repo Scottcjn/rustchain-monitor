@@ -1237,6 +1237,7 @@ class RustChainMonitor:
 
         summary = {
             "node_ok": liveness == "online",
+            "scrape_ok": True,
             "liveness": liveness,
             "version": health.get("version", "unknown") or "unknown",
             "epoch_current": validate_epoch_payload(epoch),

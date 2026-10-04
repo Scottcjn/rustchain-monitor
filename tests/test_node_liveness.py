@@ -137,6 +137,44 @@ def test_epoch_without_number_is_down(monkeypatch):
 # --- collect_network_snapshot / collect_multi_node_snapshots -----------------
 
 
+@pytest.mark.parametrize("tip_age", [144, 145])
+def test_single_node_scrape_success_is_independent_of_tip_freshness(monkeypatch, tip_age):
+    health = REAL_HEALTH.replace('"tip_age_slots":0', f'"tip_age_slots":{tip_age}')
+    calls = []
+    _install_fake_session(monkeypatch, {"https://n1": _real_node_routes(health=health)}, calls)
+
+    snapshot = RustChainMonitor("https://n1").collect_network_snapshot()
+    metrics = {metric["name"]: metric["value"] for metric in rustchain_monitor.build_node_export_metrics(snapshot)}
+
+    assert [url for url, _ in calls] == [
+        "https://n1/health", "https://n1/epoch", "https://n1/api/miners",
+    ]
+    assert metrics["rustchain_node_scrape_ok"] == 1
+    assert metrics["rustchain_node_health_ok"] == (1 if tip_age == 144 else 0)
+    assert snapshot["summary"]["scrape_ok"] is True
+    assert snapshot["summary"]["liveness"] == ("online" if tip_age == 144 else "stale")
+    if tip_age == 145:
+        assert "stale tip" in snapshot["error"]
+
+    [fleet_snapshot] = collect_multi_node_snapshots([_target("https://n1")])
+    assert fleet_snapshot["summary"] == snapshot["summary"]
+
+
+@pytest.mark.parametrize("endpoint", ["/health", "/epoch", "/api/miners"])
+def test_single_node_does_not_return_success_after_required_endpoint_failure(monkeypatch, endpoint):
+    routes = _real_node_routes()
+    routes[endpoint] = FakeResponse('{"error":"unavailable"}', status_code=503)
+    _install_fake_session(monkeypatch, {"https://n1": routes})
+
+    with pytest.raises(NodeLivenessError, match="HTTP 503"):
+        RustChainMonitor("https://n1").collect_network_snapshot()
+
+    [snapshot] = collect_multi_node_snapshots([_target("https://n1")])
+    assert snapshot["summary"]["scrape_ok"] is False
+    metrics = {metric["name"]: metric["value"] for metric in rustchain_monitor.build_node_export_metrics(snapshot)}
+    assert metrics["rustchain_node_scrape_ok"] == 0
+
+
 def test_real_node_is_online_and_miners_are_read_from_wrapped_list(monkeypatch):
     calls = []
     _install_fake_session(monkeypatch, {"https://n1": _real_node_routes()}, calls)
