@@ -14,7 +14,10 @@ Environment variables:
     TELEGRAM_CHAT_ID          - Telegram chat ID
     MOLTBOOK_API_KEY          - Moltbook API key
     MOLTBOOK_API_URL          - Moltbook API URL (default: https://moltbook.ai/api/v1)
-    API_NODE                  - RustChain node URL (default: https://50.28.86.131)
+    API_NODE                  - RustChain node URL (default: https://rustchain.org)
+    API_NODE_INSECURE_TLS     - Set to 1 to DISABLE TLS certificate verification for
+                                node fetches (default: off). Only for a self-signed node
+                                you control; prefer REQUESTS_CA_BUNDLE=/path/to/ca.pem.
     POLL_INTERVAL             - Seconds between polls (default: 60)
     STATE_FILE                - Path to track alert state (default: .epoch_state.json)
     OFFLINE_POLLS             - Consecutive missed polls before offline alert (default: 2)
@@ -33,19 +36,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
-import urllib3
 
 
-DEFAULT_NODE = "https://50.28.86.131"
+DEFAULT_NODE = "https://rustchain.org"
 DEFAULT_INTERVAL = 60
 DEFAULT_STATE_FILE = ".epoch_state.json"
 DEFAULT_MOLTBOOK_URL = "https://moltbook.ai/api/v1"
 DEFAULT_OFFLINE_POLLS = 2
 DEFAULT_TIP_AGE_MAX = 100
 DEFAULT_BACKUP_AGE_MAX_HOURS = 6.0
-
-
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+INSECURE_TLS_ENV = "API_NODE_INSECURE_TLS"
+_TRUTHY = {"1", "true", "yes", "on"}
 
 
 def default_state() -> dict:
@@ -96,9 +97,20 @@ def save_state(state_file: str, state: dict) -> None:
         json.dump(state, handle, indent=2, sort_keys=True)
 
 
+def tls_verify_enabled() -> bool:
+    """TLS certificate verification for node fetches is ON unless explicitly opted out.
+
+    Node data feeds the epoch/reward numbers this bot publishes, so an unverified
+    connection would let a man-in-the-middle post fake figures. An operator polling a
+    self-signed node they control should point REQUESTS_CA_BUNDLE at its CA; setting
+    API_NODE_INSECURE_TLS=1 is the last-resort escape hatch.
+    """
+    return os.environ.get(INSECURE_TLS_ENV, "").strip().lower() not in _TRUTHY
+
+
 def _fetch_json(node_url: str, path: str, label: str):
     try:
-        response = requests.get(f"{node_url}{path}", timeout=10, verify=False)
+        response = requests.get(f"{node_url}{path}", timeout=10, verify=tls_verify_enabled())
         response.raise_for_status()
         return response.json()
     except requests.RequestException as exc:
@@ -533,6 +545,13 @@ def main():
 
     print("RustChain Epoch Reporter starting...")
     print(f"Node: {node_url}")
+    if not tls_verify_enabled():
+        print(
+            f"WARNING: {INSECURE_TLS_ENV} is set - TLS certificate verification is DISABLED "
+            "for node fetches. Published epoch/reward numbers can be forged by a "
+            "man-in-the-middle.",
+            file=sys.stderr,
+        )
     print(f"Poll interval: {poll_interval}s")
     print(f"Discord: {'configured' if discord_webhook else 'not configured'}")
     print(f"Slack: {'configured' if slack_webhook else 'not configured'}")
