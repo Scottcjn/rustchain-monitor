@@ -122,8 +122,25 @@ def fetch_epoch(node_url: str):
     return _fetch_json(node_url, "/epoch", "epoch")
 
 
-def fetch_miners(node_url: str):
-    return _fetch_json(node_url, "/api/miners", "miners")
+def extract_miner_list(payload) -> list:
+    """/api/miners is served as {"miners": [...]} on the live nodes; older builds returned a bare list.
+
+    Mirrors ``rustchain_monitor.extract_miner_list`` so the reporter accepts the same envelope the
+    monitor already handles. Anything that is not a list (an error object, a JSON scalar, ``None``)
+    becomes an empty list, so callers that iterate rows never crash on a non-list body.
+    """
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        inner = payload.get("miners")
+        if isinstance(inner, list):
+            return inner
+    return []
+
+
+def fetch_miners(node_url: str) -> list:
+    """Fetch the active miner rows, unwrapping the live ``{"miners": [...]}`` envelope."""
+    return extract_miner_list(_fetch_json(node_url, "/api/miners", "miners"))
 
 
 def fetch_health(node_url: str):
@@ -176,10 +193,17 @@ def extract_reward_value(epoch_data: dict | None):
 
 
 def format_epoch_message(epoch_data: dict, miners: list | None, node_url: str) -> str:
-    """Format epoch data into a summary notification."""
+    """Format epoch data into a summary notification.
+
+    ``epoch_pot`` is the aggregate pool for the whole epoch, while ``reward`` (when a
+    node exposes it) is the per-miner amount. They are different units and must not be
+    conflated: the aggregate pot is reported as-is, and only a per-miner ``reward`` is
+    scaled by the enrolled miner count to estimate the distributed total.
+    """
     miners = miners or []
     epoch = epoch_data.get("epoch", "N/A")
-    reward = epoch_data.get("reward", epoch_data.get("epoch_pot", epoch_data.get("base_reward", "N/A")))
+    pot = _float_or_none(epoch_data.get("epoch_pot", epoch_data.get("base_reward")))
+    per_miner = _float_or_none(epoch_data.get("reward"))
     block_height = epoch_data.get("height", epoch_data.get("block_height", "N/A"))
     enrolled = epoch_data.get("enrolled_miners", len(miners))
 
@@ -194,18 +218,25 @@ def format_epoch_message(epoch_data: dict, miners: list | None, node_url: str) -
         hardware_counts[hw] = hardware_counts.get(hw, 0) + 1
 
     hw_parts = [f"{hw}: {count}" for hw, count in sorted(hardware_counts.items(), key=lambda item: (-item[1], item[0]))]
-    total_rtc = float(reward) * enrolled if isinstance(reward, (int, float)) else "N/A"
 
-    message = [
-        f"Epoch {epoch} settled",
-        f"Reward pot: {reward} RTC",
-        f"Enrolled miners: {enrolled}",
-        f"Currently active miners: {len(miners)}",
-    ]
+    message = [f"Epoch {epoch} settled"]
+    if pot is not None:
+        message.append(f"Epoch pot (aggregate): {pot} RTC")
+    if per_miner is not None:
+        message.append(f"Per-miner reward: {per_miner} RTC")
+    message.append(f"Enrolled miners: {enrolled}")
+    message.append(f"Currently active miners: {len(miners)}")
     if hw_parts:
         message.append(f"Hardware mix: {', '.join(hw_parts)}")
     message.append(f"Block height: {block_height}")
-    message.append(f"Estimated RTC distributed: {total_rtc}")
+    # The aggregate pot is the whole pool and is reported as-is; only a genuine
+    # per-miner reward is multiplied by the enrolled count to estimate the total.
+    if per_miner is not None and isinstance(enrolled, (int, float)):
+        message.append(f"Estimated RTC distributed: {per_miner * enrolled}")
+    elif pot is not None:
+        message.append(f"Estimated RTC distributed: {pot}")
+    else:
+        message.append("Estimated RTC distributed: N/A")
     message.append(f"Node: {node_url}")
     return "\n".join(str(part) for part in message)
 
